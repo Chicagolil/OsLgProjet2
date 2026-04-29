@@ -8,8 +8,8 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 // Place your code here. Your program must be called "handle_hook".
 
-SEC("uprobe//home/student/OsLgProjet2/Challenge1/antidebug/hangman/hangman")
-int BPF_UPROBE(handle_hook, struct diction_t *dictionary) {
+SEC("uprobe//home/student/OsLgProjet2/Challenge1/antidebug/hangman/hangman:get_word")
+int BPF_UPROBE(handle_hook) {
     // task_struct du processus qui fait tourner get_word
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     
