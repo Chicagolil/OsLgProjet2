@@ -68,7 +68,7 @@ int BPF_KPROBE(handle_hook, unsigned int fd, const char *buf, size_t count) {
             // on ne fait rien pour le reste
         }
 
-        bpf_probe_write_user(buf, local_buf, count);
+        //bpf_probe_write_user(buf, local_buf, count);
 
 
 
