@@ -4,6 +4,10 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
+
+# define O_WRONLY 1
+# define O_RDWR 2
+
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 // Place your code here. Your program must be called "handle_hook".
@@ -17,8 +21,8 @@ int BPF_PROG(handle_hook, struct file *file) {
         
         // récupérer les flags d'ouverture 
         unsigned int flags = BPF_CORE_READ(file, f_flags);
-        if(flags & O_WRONLY) {
-            return -EPERM;
+        if(flags & O_WRONLY || flags & O_RDWR) {
+            return -1;
         }
     }
     
