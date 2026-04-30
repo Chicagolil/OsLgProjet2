@@ -17,10 +17,9 @@ int BPF_PROG(handle_hook, struct file *file) {
         
         // récupérer les flags d'ouverture 
         unsigned int flags = BPF_CORE_READ(file, f_flags);
-        bpf_printk("flags: %d\n", flags);
-        // if(flags & O_WRONLY) {
-        //     return -EPERM;
-        // }
+        if(flags & O_WRONLY) {
+            return -EPERM;
+        }
     }
     
     return 0;
