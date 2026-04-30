@@ -13,6 +13,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 // Place your code here. Your program must be called "handle_hook".
 SEC("lsm/file_open")
 int BPF_PROG(handle_hook, struct file *file) {
+
     // est ce que le processus courant est le scanner ?
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     char task_name[16];
@@ -22,6 +23,7 @@ int BPF_PROG(handle_hook, struct file *file) {
         // récupérer les flags d'ouverture 
         unsigned int flags = BPF_CORE_READ(file, f_flags);
         if(flags & O_WRONLY || flags & O_RDWR) {
+	    bpf_printk("Je vois qu'il essaye d'ecrire, donc je refuse");
             return -1;
         }
     }
