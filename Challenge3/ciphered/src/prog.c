@@ -6,6 +6,13 @@
 
 static volatile int running = 1;
 
+static int libbpf_log_fn(enum libbpf_print_level level, const char *format, va_list args) {
+    if (level == LIBBPF_DEBUG) {
+        return 0;
+    }
+    return vfprintf(stderr, format, args);
+}
+
 static void handle_sig(int sig) {
     running = 0;
 }
@@ -16,6 +23,11 @@ int main(void) {
     struct bpf_program *prog;
     struct bpf_link *link;
     int err;
+    struct bpf_map *map;
+    int key = 0;
+    int value = 3;
+
+    libbpf_set_print(libbpf_log_fn);
 
     // Open the BPF object file (kernel compiled BPF program)
     obj = bpf_object__open_file("prog.bpf.o", NULL);
@@ -26,16 +38,25 @@ int main(void) {
     // Load the BPF object file into the kernel
     err = bpf_object__load(obj);
     if (err) {
-        perror("bpf_object__load");
+        fprintf(stderr, "bpf_object__load failed: %d\n", err);
         bpf_object__close(obj);   // clean up on error
         return 1;
     }
 
     // map
-    struct bpf_map *map = bpf_object__find_map_by_name(obj, "shift");
-    int key = 0; 
-    int value = 3; 
-    bpf_map__update_elem(map, &key, sizeof(key), &value, sizeof(value),BPF_ANY);
+    map = bpf_object__find_map_by_name(obj, "shift");
+    if (!map) {
+        fprintf(stderr, "map 'shift' not found\n");
+        bpf_object__close(obj);
+        return 1;
+    }
+
+    err = bpf_map__update_elem(map, &key, sizeof(key), &value, sizeof(value), BPF_ANY);
+    if (err) {
+        fprintf(stderr, "bpf_map__update_elem failed: %d\n", err);
+        bpf_object__close(obj);
+        return 1;
+    }
 
     // Find the BPF program by name
     prog = bpf_object__find_program_by_name(obj, "handle_hook");
@@ -48,8 +69,10 @@ int main(void) {
 
     // Attach the BPF program to the appropriate hook (e.g., tracepoint, kprobe)
     link = bpf_program__attach(prog);
-    if (!link) {
-        perror("bpf_program__attach");
+    err = libbpf_get_error(link);
+    if (err) {
+        fprintf(stderr, "bpf_program__attach failed: %d\n", err);
+        link = NULL;
         bpf_object__close(obj);   // clean up on error
         return 1;
     }
