@@ -60,12 +60,12 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
             
             // majuscule 
             if(c >= 'A' && c <= 'Z'){
-                local_buf[i] = 'A' + (c - 'A' + (*shift_value)) % 26;
+                local_buf[i] = 'A' + (unsigned int)(c - 'A' + (*shift_value)) % 26;
             }
             
             // minuscule 
-            if(c >= 'a' && c <= 'z'){
-                local_buf[i] = 'a' + (c - 'a' + (*shift_value)) % 26;
+            else if(c >= 'a' && c <= 'z'){
+                local_buf[i] = 'a' + (unsigned int)(c - 'a' + (*shift_value)) % 26;
             }
             
             // on ne fait rien pour le reste
