@@ -45,10 +45,10 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
         
         char local_buf[MAX_BUF_SIZE] = {0};
         __u64 read_size = size < MAX_BUF_SIZE ? size : MAX_BUF_SIZE;
-        int err = bpf_probe_read_user(local_buf, read_size, dst);
-        if(err < 0){
-            return 0; 
-        }
+        // int err = bpf_probe_read_user(local_buf, read_size, dst);
+        // if(err < 0){
+        //     return 0; 
+        // }
         
         
         for(int i = 0; i < MAX_BUF_SIZE; i++){
@@ -71,7 +71,7 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
             // on ne fait rien pour le reste
         }
 
-        bpf_probe_write_user(dst, local_buf, size);
+        //bpf_probe_write_user(dst, local_buf, size);
 
 
 
