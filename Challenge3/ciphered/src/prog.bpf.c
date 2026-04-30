@@ -36,7 +36,7 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
         if(!shift_value) {
             return -1;
         }
-        bpf_printk("valeur du shift :  %s", (*shift_value));
+        bpf_printk("valeur du shift :  %d", (*shift_value));
 
     }
     return 0;
