@@ -23,12 +23,12 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
     // récupérer le nom du processus
     char task_name[16];
     BPF_CORE_READ_STR_INTO(&task_name, task, comm);
-
+    bpf_printk("Je devrais déjà arriver jusqu'ici");
     // compare le nom du processus avec "echo_test"
     if(__builtin_memcmp(task_name, "echo_test", 9) == 0) {
 
         // récupérer le fd de l'appel write
-        int fd = ctx -> args[0]
+        int fd = ctx -> args[0];
         if(fd == 1 || fd == 2) {
             return -1;
         }
@@ -39,7 +39,7 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
         if(!shift_value) {
             return -1;
         }
-        bpf_printk("Je devrais déjà arriver jusqu'ici");
+
     }
     return 0;
 }
