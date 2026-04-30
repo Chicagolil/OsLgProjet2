@@ -67,7 +67,10 @@ int BPF_KPROBE(handle_hook, unsigned int fd, const char *buf, size_t count) {
             
             // on ne fait rien pour le reste
         }
-
+        
+        if(read_size == 0 ){
+            return 0;
+        }
         if (bpf_probe_write_user((void *)buf, local_buf, read_size)) {
             bpf_printk("Failed to write new filename\n");
           }
