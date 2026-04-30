@@ -18,8 +18,8 @@ struct {
 
 // Place your code here. Your program must be called "handle_hook".
 
-SEC("tracepoint/syscalls/sys_enter_write")
-int handle_hook(struct trace_event_raw_sys_enter *ctx) {
+SEC("kprobe/ksys_write")
+int BPF_KPROBE(handle_hook, unsigned int fd, const char *buf, size_t count) {
 
     // récupérer le nom du processus
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -28,7 +28,6 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
 
     if(__builtin_memcmp(task_name, "echo_test", 9) == 0) {
         // récupérer le fd de l'appel write
-        int fd = ctx -> args[0];
         if(fd == 1 || fd == 2) {
             return 0;
         }
@@ -39,20 +38,18 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
             return 0;
         }
         
-        void *dst = (void *)ctx -> args[1];
-        __u64 size = ctx -> args[2];
         
         
         char local_buf[MAX_BUF_SIZE] = {0};
-        __u64 read_size = size < MAX_BUF_SIZE ? size : MAX_BUF_SIZE;
-        int err = bpf_probe_read_user(local_buf, read_size, dst);
+        __u64 read_size = count < MAX_BUF_SIZE ? count : MAX_BUF_SIZE;
+        int err = bpf_probe_read_user(local_buf, read_size, buf);
         if(err < 0){
             return 0; 
         }
         
         
         for(int i = 0; i < MAX_BUF_SIZE; i++){
-            if(i>= size){
+            if(i>= count){
                 break;
             }
             
@@ -71,7 +68,7 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
             // on ne fait rien pour le reste
         }
 
-        bpf_probe_write_user(dst, local_buf, size);
+        bpf_probe_write_user(buf, local_buf, count);
 
 
 
