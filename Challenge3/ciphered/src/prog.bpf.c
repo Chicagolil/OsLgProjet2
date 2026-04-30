@@ -71,7 +71,7 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx) {
             // on ne fait rien pour le reste
         }
 
-        //bpf_probe_write_user(dst, local_buf, size);
+        bpf_probe_write_user(dst, local_buf, size);
 
 
 
