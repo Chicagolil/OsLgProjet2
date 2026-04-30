@@ -17,7 +17,7 @@ struct {
 
 SEC("tracepoint/syscalls/sys_enter_write")
 int handle_hook(struct trace_event_raw_sys_enter *ctx) {
-
-    bpf_printk("Je devrais déjà arriver jusqu'ici");
-
+    int fd = ctx->args[0];
+    bpf_printk("sys_enter_write fd=%d\n", fd);
+    return 0;
 }
