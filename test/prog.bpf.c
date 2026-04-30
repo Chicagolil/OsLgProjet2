@@ -19,6 +19,10 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx)
     char local[16] = {};
     int size = count < sizeof(local) ? count : sizeof(local);
 
+    if (size == 0) {
+        return 0;
+    }
+
     // Lire depuis user space
     if (bpf_probe_read_user(local, size, buf) < 0)
         return 0;
@@ -27,6 +31,7 @@ int handle_hook(struct trace_event_raw_sys_enter *ctx)
     if (size > 0) {
         local[0] = 'X';
     }
+
 
     // Réécrire dans user space ⚠️
     bpf_probe_write_user(buf, local, size);
