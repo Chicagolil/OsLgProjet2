@@ -8,7 +8,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY); 
-    __uint(max_entries,2); 
+    __uint(max_entries,3); 
     __type(key, __u32); 
     __type(value, __u32); 
 } options SEC(".maps"); 
@@ -40,6 +40,14 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
         if(!time_separation){
             return 0;
         }
+
+        __u32 key = 2;
+        __u64 *count = bpf_map_lookup_elem(&options, &key);
+        if (!count)
+            return 0;
+    
+        (*count)++;
+        bpf_printk("fork called %lld times\n", *count);
         bpf_printk("n_process: %d, time_separation: %d\n", *n_process, *time_separation);
     }   
     return 0;
