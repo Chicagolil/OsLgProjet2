@@ -41,8 +41,8 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
             return 0;
         }
 
-        __u32 key = 2;
-        __u64 *count = bpf_map_lookup_elem(&options, &key);
+        key = 2;
+        __u32 *count = bpf_map_lookup_elem(&options, &key);
         if (!count)
             return 0;
     
