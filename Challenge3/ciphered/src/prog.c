@@ -13,7 +13,7 @@ static void handle_sig(int sig) {
     running = 0;
 }
 
-static struct option long_options{
+static struct option long_options[] = {
     {'shift', required_argument, 0, 's'}
     {0,0,0,0}
 };
@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
         return -1;
     }
     int key = 0; 
-    int shift_value = shift_value % 26;
+    shift_value = shift_value % 26;
  
     bpf_map__update_elem(map, &key, sizeof(key), &shift_value, sizeof(shift_value),BPF_ANY);
 
