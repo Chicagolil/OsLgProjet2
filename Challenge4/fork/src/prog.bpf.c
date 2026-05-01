@@ -68,8 +68,30 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
 
         // récuperer le timestamp actuel
         __u64 timestamp = bpf_ktime_get_ns();
-        bpf_printk("timestamp: %lld\n", timestamp);
-        bpf_printk("n_process: %d, time_separation: %d\n", *n_process, *time_separation);
+
+        // récupérer le count des enfants
+        key = 0; 
+        __u32 *count = bpf_map_lookup_elem(&child_count, &key);
+        if(!count){
+            return 0;
+        }
+
+        // récupérer l'index courant de la fenêtre
+        key = 0; 
+        __u32 *index = bpf_map_lookup_elem(&window_index, &key);
+        if(!index){
+            return 0;
+        }
+        
+        // vérifier si la fenêtre est remplie 
+        if(*count < *n_process){
+            // ajouter le timestamp à la fenêtre
+            key = *index;
+            bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
+            (*index)++;
+            (*count)++;
+            return 0; 
+        }
     }   
     return 0;
 }
