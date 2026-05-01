@@ -11,7 +11,7 @@ int main() {
     char buffer[N] = {0};
     const char *filename = "output.txt";
 
-    strcpy(buffer, "Hello123\n");
+    strcpy(buffer, "Zxylo123\n");
 
     printf("1. Open %s to write:\n%s\n", filename, buffer);
     file = fopen(filename, "w+");
