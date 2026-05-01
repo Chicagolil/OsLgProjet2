@@ -15,4 +15,32 @@ struct {
 
 
 
-// Place your code here. Your program must be called "handle_hook".
+// hook après le fork pour récup le PID de l'enfant 
+SEC("tracepoint/syscalls/sys_exit_clone")
+int handle_hook(struct trace_event_raw_sys_exit *ctx){
+    
+    // récupérer le nom du processus
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    
+    char task_name[16];
+    BPF_CORE_READ_STR_INTO(&task_name, task, comm);
+    
+    // processus == forking ?
+    if(__builtin_memcmp(task_name, "forking", 7) == 0){
+        
+        // lire les valeurs de la map options
+        __u32 key = 0;
+        __32 n_process = bpf_map_lookup_elem(options, &key, sizeof(key), &val, sizeof(val));
+        if(n_process != 0){
+            return 0; 
+        }
+
+        key = 1;
+        __u32 time_separation = bpf_map_lookup_elem(options, &key, sizeof(key), &val, sizeof(val));
+        if(time_separation != 0){
+            return 0;
+        }
+        bpf_printk("n_process: %d, time_separation: %d\n", n_process, time_separation);
+    }   
+    return 0;
+}
