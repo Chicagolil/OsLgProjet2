@@ -30,17 +30,17 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
         
         // lire les valeurs de la map options
         __u32 key = 0;
-        __32 n_process = bpf_map_lookup_elem(options, &key, sizeof(key), &val, sizeof(val));
-        if(n_process != 0){
+        __u32 *n_process = bpf_map_lookup_elem(&options, &key);
+        if(!n_process){
             return 0; 
         }
 
         key = 1;
-        __u32 time_separation = bpf_map_lookup_elem(options, &key, sizeof(key), &val, sizeof(val));
-        if(time_separation != 0){
+        __u32 *time_separation = bpf_map_lookup_elem(&options, &key);
+        if(!time_separation){
             return 0;
         }
-        bpf_printk("n_process: %d, time_separation: %d\n", n_process, time_separation);
+        bpf_printk("n_process: %d, time_separation: %d\n", *n_process, *time_separation);
     }   
     return 0;
 }
