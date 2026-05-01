@@ -14,7 +14,7 @@ static void handle_sig(int sig) {
 }
 
 static struct option long_options[] = {
-    {'shift', required_argument, 0, 's'}
+    {'shift', required_argument, 0, 's'},
     {0,0,0,0}
 };
 
