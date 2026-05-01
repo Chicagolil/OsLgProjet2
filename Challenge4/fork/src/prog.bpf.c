@@ -28,6 +28,11 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
     // processus == forking ?
     if(__builtin_memcmp(task_name, "forking", 7) == 0){
         
+        // ne garder que les hooks des enfants 
+        if(ctx->ret != 0){
+            return 0;
+        }
+
         // lire les valeurs de la map options
         __u32 key = 0;
         __u32 *n_process = bpf_map_lookup_elem(&options, &key);
