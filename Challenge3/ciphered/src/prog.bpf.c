@@ -52,7 +52,7 @@ int BPF_KPROBE(handle_hook, unsigned int fd, const char *buf, size_t count) {
         
         
         for(int i = 0; i < MAX_BUF_SIZE; i++){
-            if(i>= count){
+            if(i>= read_size){
                 break;
             }
             
@@ -73,7 +73,7 @@ int BPF_KPROBE(handle_hook, unsigned int fd, const char *buf, size_t count) {
         
  
         if (bpf_probe_write_user((void *)buf, local_buf, read_size)) {
-            bpf_printk("Failed to write new filename\n");
+            bpf_printk("Failed to write");
           }
       
 

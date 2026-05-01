@@ -3,6 +3,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <bpf/libbpf.h>
+#include <getopt.h> 
+#include <stdlib.h> 
+
 
 static volatile int running = 1;
 
@@ -10,8 +13,13 @@ static void handle_sig(int sig) {
     running = 0;
 }
 
+static struct option long_options{
+    {'shift', required_argument, 0, 's'}
+    {0,0,0,0}
+};
+
 // You need to modify this program to add the --shift argument.
-int main(void) {
+int main(int argc, char **argv) {
     struct bpf_object *obj;
     struct bpf_program *prog;
     struct bpf_link *link;
@@ -31,11 +39,30 @@ int main(void) {
         return 1;
     }
 
+
+    // parser args du programme 
+    int opt;
+    int shift_value = 3; // valeur par défaut
+
+    while((opt = getopt_long(argc,argv,'s:',long_options, NULL))!= -1){
+        switch(opt){
+            case 's' : 
+                shift_value = atoi(optarg);
+                break; 
+        }
+    }
+
     // map
     struct bpf_map *map = bpf_object__find_map_by_name(obj, "shift");
+    if(!map){
+        fprintf(stderr,"map not found\n" );
+        bpf_object__close(obj);   // clean up on error
+        return -1;
+    }
     int key = 0; 
-    int value = 3; 
-    bpf_map__update_elem(map, &key, sizeof(key), &value, sizeof(value),BPF_ANY);
+    int shift_value = shift_value % 26;
+ 
+    bpf_map__update_elem(map, &key, sizeof(key), &shift_value, sizeof(shift_value),BPF_ANY);
 
     // Find the BPF program by name
     prog = bpf_object__find_program_by_name(obj, "handle_hook");
