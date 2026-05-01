@@ -14,7 +14,7 @@ static void handle_sig(int sig) {
 }
 
 static struct option long_options[] = {
-    {'shift', required_argument, 0, 's'},
+    {"shift", required_argument, 0, 's'},
     {0,0,0,0}
 };
 
@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     int opt;
     int shift_value = 3; // valeur par défaut
 
-    while((opt = getopt_long(argc,argv,'s:',long_options, NULL))!= -1){
+    while((opt = getopt_long(argc,argv,"s:",long_options, NULL))!= -1){
         switch(opt){
             case 's' : 
                 shift_value = atoi(optarg);
