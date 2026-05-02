@@ -24,14 +24,14 @@ int BPF_KPROBE(handle_hook){
     BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
     
     if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
-        bpf_printk("je passe ici");
+  
         __u32 key = 0;
         __u32 *count = bpf_map_lookup_elem(&counter, &key ); 
         if(!count){
             return 0; 
         }
         (*count)++; 
-        bpf_printk("Nbr de fois que le hook est éxécuté : %d", *count); 
+        bpf_printk("Nbr de fois que le hook est éxécuté : %d\n", *count); 
 
     }
     return 0;
