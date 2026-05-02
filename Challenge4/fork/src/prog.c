@@ -16,7 +16,7 @@ static void handle_sig(int sig) {
 
 static struct option long_options[] = {
     {"n_process",required_argument, 0,'n'},
-    {"time_separation", required_argument, 0, 't'},
+    {"time_separation_sec", required_argument, 0, 't'},
     {0,0,0,0}
 };
 
