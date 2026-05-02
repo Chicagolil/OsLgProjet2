@@ -17,14 +17,14 @@ struct {
 
 
 SEC("kprobe/handle_mm_fault")
-BPF_KPROBE(handle_hook){
+int BPF_KPROBE(handle_hook){
 
     struct task_struct *task= (struct task_struct *)bpf_get_current_task();
     
     char task_name[16]; 
-    BPF_CORE_READ_STR_INTO(&taskname, task, comm); 
+    BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
 
-    if(__builtin_memcmp(task_name, "page_fault_gen")){
+    if((__builtin_memcmp(task_name, "page_fault_gen", 15)) == 0){
         __u32 key = 0;
         __u32 *count = bpf_map_lookup_elem(&counter, &key ); 
         if(!count){
