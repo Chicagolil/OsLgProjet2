@@ -12,8 +12,8 @@ struct{
     __uint(type, BPF_MAP_TYPE_ARRAY); 
     __uint(max_entries,3); 
     __type(key, __u32); 
-    __type(value, __u64);   
-} options SEC(".maps")
+    __type(value, __u32);   
+} options SEC(".maps");
 
 SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(handle_hook){

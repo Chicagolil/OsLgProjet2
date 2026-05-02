@@ -3,6 +3,8 @@
 #include <errno.h>
 #include <signal.h>
 #include <bpf/libbpf.h>
+#include <getopt.h>
+#include <stdlib.h>
 
 static volatile int running = 1;
 
@@ -17,7 +19,7 @@ static struct option long_options[] = {
     {0,0,0,0}
 };
 
-int main(void) {
+int main(int argc, char **argv) {
     struct bpf_object *obj;
     struct bpf_program *prog;
     struct bpf_link *link;
