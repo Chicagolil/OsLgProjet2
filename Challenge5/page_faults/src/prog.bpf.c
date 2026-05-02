@@ -23,7 +23,7 @@ int BPF_KPROBE(handle_hook){
     char task_name[16]; 
     BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
     
-    if((__builtin_memcmp(task_name, "page_fault_gen", 14)) == 0){
+    if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
         bpf_printk("je passe ici");
         __u32 key = 0;
         __u32 *count = bpf_map_lookup_elem(&counter, &key ); 
