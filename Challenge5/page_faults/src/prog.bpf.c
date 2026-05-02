@@ -55,7 +55,7 @@ int BPF_KPROBE(handle_hook){
 
         // test du buffer 
         __u32 pid = bpf_get_current_pid_tgid() >> 32;
-        struct event test = {.pid=25 , .type= 1};
+        struct event test = {.pid=pid , .type= 1};
         bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &test, sizeof(test));
 
        
