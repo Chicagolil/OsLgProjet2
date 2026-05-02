@@ -92,7 +92,7 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
         }
         // sinon, mettre à jour la fenêtre
         for (int i = 0; i < 32; i++){
-            if(i >= n_process) {
+            if(i >= *n_process) {
                 break;
             }
 
