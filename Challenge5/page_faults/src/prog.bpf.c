@@ -3,6 +3,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "buffer_struct.h"
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
@@ -14,6 +15,12 @@ struct{
     __type(key, __u32); 
     __type(value, __u32);   
 } options SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+} events SEC(".maps");
 
 SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(handle_hook){
@@ -46,7 +53,12 @@ int BPF_KPROBE(handle_hook){
             return 0;
         }
 
-        bpf_printk("options : %d; %d; %d", *lower_bound_freq_ms,*upper_bound_freq_ms, *time_window_ms);
+        // test du buffer 
+        __u32 pid = bpf_get_current_pid_tgid() >> 32;
+        struct event test = {.pid=25 , .type= 1};
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &test, sizeof(struct_perf));
+
+       
     }
     return 0;
 }
