@@ -30,7 +30,7 @@ int BPF_KPROBE(handle_hook){
         if(!count){
             return 0; 
         }
-        (*count)++; 
+        //(*count)++; 
         bpf_printk("Nombre : %d", *count); 
     }
     return 0;
