@@ -20,7 +20,7 @@ SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(handle_hook){
 
     struct task_struct *task= (struct task_struct *)bpf_get_current_task();
-    
+    bpf_printk("je passe ici");
     char task_name[16]; 
     BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
 
