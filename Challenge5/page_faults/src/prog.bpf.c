@@ -8,13 +8,12 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 // Place your code here. Your program must be called "handle_hook".
 
-struct {
+struct{
     __uint(type, BPF_MAP_TYPE_ARRAY); 
-    __uint(max_entries, 1); 
+    __uint(max_entries,3); 
     __type(key, __u32); 
-    __type(value, __u32); 
-} counter SEC(".maps"); 
-
+    __type(value, __u64);   
+} options SEC(".maps")
 
 SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(handle_hook){
@@ -24,13 +23,29 @@ int BPF_KPROBE(handle_hook){
     BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
     
     if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
+
+        // récuperer les options 
+        // lower_bound_freq_ms
         __u32 key = 0;
-        __u32 *count = bpf_map_lookup_elem(&counter, &key ); 
-        if(!count){
+        __u32 *lower_bound_freq_ms = bpf_map_lookup_elem(&options, &key);
+        if(!lower_bound_freq_ms){
             return 0; 
         }
-        (*count)++; 
-        bpf_printk("Nombre : %d", *count); 
+
+        // upper_bound_freq_ms 
+        key = 1;
+        __u32 *upper_bound_freq_ms  = bpf_map_lookup_elem(&options, &key);
+        if(!upper_bound_freq_ms){
+            return 0;
+        }
+
+        // time_window_ms
+        key = 2;
+        __u32 *time_window_ms  = bpf_map_lookup_elem(&options, &key);
+        if(!time_window_ms){
+            return 0;
+        }
+
     }
     return 0;
 }
