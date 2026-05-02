@@ -25,7 +25,7 @@ int BPF_KPROBE(handle_hook){
     
     if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
 
-        bpf_printk("Nombre de fois que le hook est appelé :"); 
+        bpf_printk("je passe ici"); 
   
         __u32 key = 0;
         //__u32 *count = bpf_map_lookup_elem(&counter, &key ); 
