@@ -25,13 +25,6 @@ struct {
     __uint(max_entries, 1); 
     __type(key, __u32); 
     __type(value, __u32); 
-} window_index SEC(".maps"); 
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY); 
-    __uint(max_entries, 1); 
-    __type(key, __u32); 
-    __type(value, __u32); 
 } child_count SEC(".maps"); 
 
 
@@ -76,22 +69,46 @@ int handle_hook(struct trace_event_raw_sys_exit *ctx){
             return 0;
         }
 
-        // récupérer l'index courant de la fenêtre
-        key = 0; 
-        __u32 *index = bpf_map_lookup_elem(&window_index, &key);
-        if(!index){
-            return 0;
-        }
-        
+
         // vérifier si la fenêtre est remplie 
         if(*count < *n_process){
             // ajouter le timestamp à la fenêtre
-            key = *index;
+            key = *count;
             bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
-            (*index)++;
             (*count)++;
             return 0; 
         }
+
+        // la fenêtre est remplie, vérifier si le temps de séparation est respecté
+        key = 0;
+        __u64 *old_timestamp = bpf_map_lookup_elem(&timestamps, &key);
+        if(!old_timestamp){
+            return 0;
+        }
+        // si le delta est trop petit, tuer l'enfant
+        if(timestamp - *old_timestamp < (__u64)(*time_separation) * 1000000000ULL){
+            bpf_send_signal(9);
+            return 0; 
+        }
+        // sinon, mettre à jour la fenêtre
+        for (int i = 0; i < 32; i++){
+            if(i >= n_process) {
+                break;
+            }
+
+            __u32 curr_key = i; 
+            __u32 next_key = i +1; 
+            
+            __u64 *next_val = bpf_map_lookup_elem(&timestamps, &next_key); 
+            if(!next_val){
+                break; 
+            }
+            bpf_map_update_elem(&timestamps, &curr_key, next_val, BPF_ANY);
+        }
+        __u32 last_key = *n_process -1; 
+        bpf_map_update_elem(&timestamps,&last_key, &timestamp, BPF_ANY); 
+        return 0;
+    
     }   
     return 0;
 }
