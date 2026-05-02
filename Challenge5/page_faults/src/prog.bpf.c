@@ -26,12 +26,13 @@ int BPF_KPROBE(handle_hook){
     if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
   
         __u32 key = 0;
-        __u32 *count = bpf_map_lookup_elem(&counter, &key ); 
-        bpf_printk("Nbr de fois que le hook est éxécuté : %d\n", *count); 
-        if(!count){
-            return 0; 
-        }
-        (*count)++; 
+        //__u32 *count = bpf_map_lookup_elem(&counter, &key ); 
+        // bpf_printk("Nbr de fois que le hook est éxécuté : %d\n", *count); 
+        bpf_printk("Nbr de fois que le hook est éxécuté : "); 
+        // if(!count){
+        //     return 0; 
+        // }
+        // (*count)++; 
 
     }
     return 0;
