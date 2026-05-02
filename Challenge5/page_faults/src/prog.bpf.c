@@ -31,6 +31,8 @@ int BPF_KPROBE(handle_hook){
             return 0; 
         }
 
-        bpf_printk("Nbr de fois que le hook est éxécuté : %d"; *count); 
+        bpf_printk("Nbr de fois que le hook est éxécuté : %d", *count); 
+
+        return 0;
     }
 }
