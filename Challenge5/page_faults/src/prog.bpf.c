@@ -46,6 +46,7 @@ int BPF_KPROBE(handle_hook){
             return 0;
         }
 
+        bpf_printk("options : %d; %d; %d", *lower_bound_freq_ms,*upper_bound_freq_ms, *time_window_ms);
     }
     return 0;
 }
