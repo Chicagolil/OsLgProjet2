@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_sig);
     signal(SIGTERM, handle_sig);
 
-    printf("Program loaded. Press Ctrl+C to exit.\n");
+    printf("PFF monitor: lower=%d hz, upper=%d hz, window=%d ms\n Monitoring started (filtering by process name). Press Ctrl+C to stop.\n",lower_bound_freq_ms,upper_bound_freq_ms,time_window_ms );
 
     int perf_map_fd = bpf_object__find_map_fd_by_name(obj, "events");
     if (perf_map_fd < 0) {
