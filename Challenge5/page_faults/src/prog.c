@@ -6,6 +6,9 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include "buffer_struct.h"
+#include <time.h>
+#include <bpf/bpf.h>  
+
 
 static volatile int running = 1;
 
