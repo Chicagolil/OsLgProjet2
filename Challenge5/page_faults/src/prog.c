@@ -23,10 +23,10 @@ static struct option long_options[] = {
 void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz){
     const struct event *e = data;
     if(e->type == 1){ 
-        printf("PFF too high for process with PID %d", e->pid);
+        printf("PFF too high for process with PID %d\n", e->pid);
     }
     if(e->type == 0){ 
-        printf("PFF too low for process with PID %d", e->pid);
+        printf("PFF too low for process with PID %d\n", e->pid);
     }
 
 }
