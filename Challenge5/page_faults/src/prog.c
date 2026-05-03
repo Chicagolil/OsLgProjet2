@@ -78,7 +78,7 @@ int main(int argc, char **argv)
         __u32 upper;
     } cfg;
 
-    cfg.window_ns = (u64)window * 1000000ULL;
+    cfg.window_ns = (__u64)window * 1000000ULL;
     cfg.upper = upper * window;
 
     st.window_ns = cfg.window_ns;
