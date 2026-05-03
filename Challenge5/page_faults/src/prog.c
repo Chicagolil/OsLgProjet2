@@ -46,17 +46,10 @@ void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz){
         fflush(stdout);
 
     }
-    else if (e->type == EVENT_PF_TS) {
-        // page fault reçu → planifier check dans T ms
+    else if(e->type == EVENT_PF_TS) {
         monitored_pid = e->pid;
-
-        if (first_pf_time == 0)
-            first_pf_time = e->timestamp;
-
-        // on planifie le check au moment où ce PF quitte la fenêtre
-        unsigned long long check_time = e->timestamp + window_ns_g;
-        if (check_time > next_check_ns)
-            next_check_ns = check_time;
+        if(first_pf_time == 0) first_pf_time = e->timestamp;
+        next_check_ns = e->timestamp + window_ns_g;  // ← toujours mettre à jour
     }
 
 }
