@@ -3,42 +3,19 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+#include "buffer_struct.h"
 
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-#define MAX_EVENTS 10000
+// Place your code here. Your program must be called "handle_hook".
 
-struct event {
-    __u32 pid;
-    __u32 type; // 1 = HIGH
-    __u64 ts;
-};
-
-struct config {
-    __u64 window_ns;
-    __u32 upper;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, MAX_EVENTS);
-    __type(key, __u32);
-    __type(value, __u64);
-} timestamps SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u32);
-} index_map SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, struct config);
-} config_map SEC(".maps");
+// options
+struct{
+    __uint(type, BPF_MAP_TYPE_ARRAY); 
+    __uint(max_entries,3); 
+    __type(key, __u32); 
+    __type(value, __u32);   
+} options SEC(".maps");
 
 // perf buffer
 struct {
@@ -47,62 +24,132 @@ struct {
     __uint(value_size, sizeof(__u32));
 } events SEC(".maps");
 
+// fenêtre glissante des timestamps 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 10000);  // max upper_bound_count
+    __type(key, __u32);
+    __type(value, __u64);
+} timestamps SEC(".maps");
+
+// index courant dans la fenêtre
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} window_index SEC(".maps");
+
+// compteur de page faults
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} pf_count SEC(".maps");
+
+// bonus, limiter l'utilisation du buffer 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} too_high_flag SEC(".maps");
+
 SEC("kprobe/handle_mm_fault")
-int handle_fault(struct pt_regs *ctx)
-{
-    __u32 key = 0;
+int BPF_KPROBE(handle_hook){
 
-    // filtre process
-    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    char comm[16];
-    BPF_CORE_READ_STR_INTO(&comm, task, comm);
+    struct task_struct *task= (struct task_struct *)bpf_get_current_task();
+    char task_name[16]; 
+    BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
+    
+    if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
 
-    if (__builtin_memcmp(comm, "page_fault_gen", 15) != 0)
-        return 0;
+        // récuperer les options 
+        // lower_bound_freq_ms
+        __u32 key = 0;
+        __u32 *lower_bound_freq_ms = bpf_map_lookup_elem(&options, &key);
+        if(!lower_bound_freq_ms){
+            return 0; 
+        }
 
-    struct config *cfg = bpf_map_lookup_elem(&config_map, &key);
-    if (!cfg)
-        return 0;
+        // upper_bound_freq_ms 
+        key = 1;
+        __u32 *upper_bound_freq_ms  = bpf_map_lookup_elem(&options, &key);
+        if(!upper_bound_freq_ms){
+            return 0;
+        }
 
-    __u64 now = bpf_ktime_get_ns();
+        // time_window_ms
+        key = 2;
+        __u32 *time_window_ms  = bpf_map_lookup_elem(&options, &key);
+        if(!time_window_ms){
+            return 0;
+        }
 
-    __u32 *idx = bpf_map_lookup_elem(&index_map, &key);
-    if (!idx)
-        return 0;
+        // récuperer le timestamp actuel
+        __u64 timestamp = bpf_ktime_get_ns();
 
-    __u32 i = *idx;
-    __u32 slot = i % MAX_EVENTS;
+        // récupérer l'index courant 
+        key = 0;
+        __u32 *index = bpf_map_lookup_elem(&window_index, &key); 
+        if(!index){
+            return 0;
+        }
 
-    bpf_map_update_elem(&timestamps, &slot, &now, BPF_ANY);
-    *idx = i + 1;
+        // récupérer le compteur 
+        key = 0;
+        __u32 *count = bpf_map_lookup_elem(&pf_count, &key);
+        if(!count){
+            return 0;
+        };
 
-    // compter dans la fenêtre
-    __u32 count = 0;
+        // vérifier si la fenêtre est remplie 
+        __u64 upper_bound_count = (__u64)*upper_bound_freq_ms * (__u64)*time_window_ms;
+        if(*count < upper_bound_count ) { 
+            // écrire le timestamps à l'index courant 
+            key = *count; 
+            bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
+            (*count)++;
+            (*index)++; 
+            return 0; 
+        }
 
-#pragma unroll
-    for (int j = 0; j < 128; j++) { // limité pour verifier
-        if (j >= MAX_EVENTS)
-            break;
+        // la map est remplie 
+        __u32 old_index = (*index) % upper_bound_count;
+        key = old_index;
 
-        __u32 k = (i - j) % MAX_EVENTS;
-        __u64 *ts = bpf_map_lookup_elem(&timestamps, &k);
-        if (!ts)
-            break;
+        // timestamp le plus vieux 
+        __u64 *old_timestamp = bpf_map_lookup_elem(&timestamps,&key); 
+        if(!old_timestamp){
+            return 0; 
+        }
+        
+        // récupérer le flag 
+        key = 0;
+        __u32 *flag = bpf_map_lookup_elem(&too_high_flag, &key);
+        if(!flag){
+            return 0;
+        }
+        __u64 delta =  timestamp - *old_timestamp;
+        __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
+        if(delta < window_ns ){
+            if(*flag == 0){
+                // too high → envoyer message
+                __u32 pid = bpf_get_current_pid_tgid() >> 32;
+                struct event e = {.pid = pid, .type = 1};
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
+                *flag = 1;
+            }
 
-        if (now - *ts > cfg->window_ns)
-            break;
-
-        count++;
+        } else {
+            *flag = 0;
+        }
+       
+        // mettre à jour la fenêtre 
+        key = old_index; 
+        bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
+        *index = (*index + 1) % upper_bound_count;
     }
-
-    if (count > cfg->upper) {
-        struct event e = {};
-        e.pid = bpf_get_current_pid_tgid() >> 32;
-        e.type = 1;
-        e.ts = now;
-
-        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
-    }
-
     return 0;
 }
