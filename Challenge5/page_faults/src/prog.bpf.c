@@ -9,34 +9,34 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define MAX_EVENTS 10000
 
 struct event {
-    u32 pid;
-    u32 type; // 1 = HIGH
-    u64 ts;
+    __u32 pid;
+    __u32 type; // 1 = HIGH
+    __u64 ts;
 };
 
 struct config {
-    u64 window_ns;
-    u32 upper;
+    __u64 window_ns;
+    __u32 upper;
 };
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, MAX_EVENTS);
-    __type(key, u32);
-    __type(value, u64);
+    __type(key, __u32);
+    __type(value, __u64);
 } timestamps SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, u32);
+    __type(key, __u32);
+    __type(value, __u32);
 } index_map SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
-    __type(key, u32);
+    __type(key, __u32);
     __type(value, struct config);
 } config_map SEC(".maps");
 
@@ -47,7 +47,7 @@ struct {
 SEC("kprobe/handle_mm_fault")
 int handle_fault(struct pt_regs *ctx)
 {
-    u32 key = 0;
+    __u32 key = 0;
 
     // filtre process
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
@@ -61,28 +61,28 @@ int handle_fault(struct pt_regs *ctx)
     if (!cfg)
         return 0;
 
-    u64 now = bpf_ktime_get_ns();
+    __u64 now = bpf_ktime_get_ns();
 
-    u32 *idx = bpf_map_lookup_elem(&index_map, &key);
+    __u32 *idx = bpf_map_lookup_elem(&index_map, &key);
     if (!idx)
         return 0;
 
-    u32 i = *idx;
-    u32 slot = i % MAX_EVENTS;
+    __u32 i = *idx;
+    __u32 slot = i % MAX_EVENTS;
 
     bpf_map_update_elem(&timestamps, &slot, &now, BPF_ANY);
     *idx = i + 1;
 
     // compter dans la fenêtre
-    u32 count = 0;
+    __u32 count = 0;
 
 #pragma unroll
     for (int j = 0; j < 128; j++) { // limité pour verifier
         if (j >= MAX_EVENTS)
             break;
 
-        u32 k = (i - j) % MAX_EVENTS;
-        u64 *ts = bpf_map_lookup_elem(&timestamps, &k);
+        __u32 k = (i - j) % MAX_EVENTS;
+        __u64 *ts = bpf_map_lookup_elem(&timestamps, &k);
         if (!ts)
             break;
 

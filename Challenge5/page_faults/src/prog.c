@@ -4,6 +4,7 @@
 #include <getopt.h>
 #include <time.h>
 #include <bpf/libbpf.h>
+#include <bpf/bpf.h>
 
 static unsigned long long now_ns(void)
 {
@@ -14,21 +15,21 @@ static unsigned long long now_ns(void)
 }
 
 struct event {
-    u32 pid;
-    u32 type;
-    u64 ts;
+    __u32 pid;
+    __u32 type;
+    __u64 ts;
 };
 
 struct state {
-    u64 last_ts;
-    u64 window_ns;
-    u32 lower;
+    __u64 last_ts;
+    __u64 window_ns;
+    __u32 lower;
     int started;
 };
 
 static struct state st = {};
 
-int handle_event(void *ctx, void *data, size_t len)
+void handle_event(void *ctx, int cpu, void *data, __u32 size)
 {
     struct event *e = data;
 
@@ -42,8 +43,6 @@ int handle_event(void *ctx, void *data, size_t len)
     if (e->type == 1) {
         printf("PFF too high for process with PID %d\n", e->pid);
     }
-
-    return 0;
 }
 
 int main(int argc, char **argv)
@@ -75,8 +74,8 @@ int main(int argc, char **argv)
 
     // config
     struct {
-        u64 window_ns;
-        u32 upper;
+        __u64 window_ns;
+        __u32 upper;
     } cfg;
 
     cfg.window_ns = (u64)window * 1000000ULL;
@@ -102,7 +101,7 @@ int main(int argc, char **argv)
         if (!st.started)
             continue;
 
-        u64 now = now_ns();
+        __u64 now = now_ns();
 
         // check LOW
         if (now - st.last_ts > st.window_ns) {
