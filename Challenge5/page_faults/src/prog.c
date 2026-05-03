@@ -46,17 +46,10 @@ void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz){
         fflush(stdout);
 
     }
-    else if (e->type == EVENT_PF_TS) {
-        // page fault reçu → planifier check dans T ms
+    else if(e->type == EVENT_PF_TS) {
         monitored_pid = e->pid;
-
-        if (first_pf_time == 0)
-            first_pf_time = e->timestamp;
-
-        // on planifie le check au moment où ce PF quitte la fenêtre
-        unsigned long long check_time = e->timestamp + window_ns_g;
-        if (check_time > next_check_ns)
-            next_check_ns = check_time;
+        if(first_pf_time == 0) first_pf_time = e->timestamp;
+        next_check_ns = e->timestamp + window_ns_g;  // ← toujours mettre à jour
     }
 
 }
@@ -193,18 +186,15 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // check too_low seulement après une fenêtre complète
         if (first_pf_time == 0) continue;
         if (now_ns() < first_pf_time + window_ns_g) continue;
         if (next_check_ns == 0 || now_ns() < next_check_ns) continue;
-
-        next_check_ns = 0;
-
+        
         // compter les PFs dans [now-T, now]
         unsigned long long now       = now_ns();
         unsigned long long win_start = now - window_ns_g;
         unsigned int count_in_window = 0;
-
+        
         for (unsigned int i = 0; i < upper_bound_count_g; i++) {
             __u32 k  = i;
             __u64 ts = 0;
@@ -212,11 +202,14 @@ int main(int argc, char **argv) {
             if (ts >= win_start && ts <= now)
                 count_in_window++;
         }
-
+        
         if (count_in_window < lower_bound_count_g) {
             printf("PFF too low for process with PID %d\n", monitored_pid);
             fflush(stdout);
         }
+        
+        // ✅ replanifier le prochain check dans T ms
+        next_check_ns = now_ns() + window_ns_g;
     }
     
     perf_buffer__free(pb);
