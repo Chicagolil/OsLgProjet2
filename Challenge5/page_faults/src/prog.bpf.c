@@ -118,8 +118,8 @@ int BPF_KPROBE(handle_hook){
         }
 
         __u64 delta =  timestamp - *old_timestamp;
-
-        if(delta < (__u64)time_window_ms * 1000000ULL ){
+        __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
+        if(delta < window_ns ){
             // too high → envoyer message
             __u32 pid = bpf_get_current_pid_tgid() >> 32;
             struct event e = {.pid = pid, .type = 1};
