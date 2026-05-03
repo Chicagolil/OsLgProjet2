@@ -48,6 +48,14 @@ struct {
     __type(value, __u32);
 } pf_count SEC(".maps");
 
+// bonus, limiter l'utilisation du buffer 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} too_high_flag SEC(".maps");
+
 SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(handle_hook){
 
@@ -116,14 +124,26 @@ int BPF_KPROBE(handle_hook){
         if(!old_timestamp){
             return 0; 
         }
-
+        
+        // récupérer le flag 
+        __u32 key = 0;
+        __u32 *flag = bpf_map_lookup_elem(&too_high_flag, &key);
+        if(!flag){
+            return 0;
+        }
         __u64 delta =  timestamp - *old_timestamp;
         __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
         if(delta < window_ns ){
-            // too high → envoyer message
-            __u32 pid = bpf_get_current_pid_tgid() >> 32;
-            struct event e = {.pid = pid, .type = 1};
-            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
+            if(*flag == 0){
+                // too high → envoyer message
+                __u32 pid = bpf_get_current_pid_tgid() >> 32;
+                struct event e = {.pid = pid, .type = 1};
+                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
+                *flag = 1;
+            }
+
+        } else {
+            *flag = 0;
         }
        
         // mettre à jour la fenêtre 
