@@ -1,141 +1,189 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 #include "buffer_struct.h"
 
-char LICENSE[] SEC("license") = "GPL";
+char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
-/*
- * options[0] = lower_bound_freq_ms
- * options[1] = upper_bound_freq_ms
- * options[2] = time_window_ms
- * (filled by user space before attachment)
- */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 3);
-    __type(key, __u32);
-    __type(value, __u32);
+// Place your code here. Your program must be called "handle_hook".
+
+// options
+struct{
+    __uint(type, BPF_MAP_TYPE_ARRAY); 
+    __uint(max_entries,3); 
+    __type(key, __u32); 
+    __type(value, __u32);   
 } options SEC(".maps");
 
-/*
- * Circular buffer: timestamps[i] = nanosecond timestamp of the fault
- * stored in slot i.  Indexed by head in [0, MAX_FAULTS).
- */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, MAX_FAULTS);
-    __type(key, __u32);
-    __type(value, __u64);
-} timestamps SEC(".maps");
-
-/*
- * state[0] = head        — next write slot, wraps in [0, MAX_FAULTS)
- * state[1] = total_count — total faults seen, capped at MAX_FAULTS
- * state[2] = target_pid  — PID of page_fault_gen (0 until first fault)
- */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 3);
-    __type(key, __u32);
-    __type(value, __u32);
-} state SEC(".maps");
-
-/*
- * first_ts[0] = nanosecond timestamp of the very first observed fault.
- * Used by user space to skip the startup phase for lower-bound checks.
- */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u64);
-} first_ts SEC(".maps");
-
-/* Perf output — carries EVENT_TOO_HIGH events to user space */
+// perf buffer
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u32));
 } events SEC(".maps");
 
+// fenêtre glissante des timestamps 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 10000);  // max upper_bound_count
+    __type(key, __u32);
+    __type(value, __u64);
+} timestamps SEC(".maps");
+
+// index courant dans la fenêtre
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} window_index SEC(".maps");
+
+// compteur de page faults
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} pf_count SEC(".maps");
+
+// bonus, limiter l'utilisation du buffer 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);
+} too_high_flag SEC(".maps");
+
+
+
+// Dernier timestamp envoyé (pour throttling)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} last_pf_ts_sent SEC(".maps");
+
+
 SEC("kprobe/handle_mm_fault")
-int handle_hook(struct pt_regs *ctx)
-{
-    /* ---- 1. Filter by process name "page_fault_gen" (14 chars) ---- */
-    char comm[16];
-    bpf_get_current_comm(comm, sizeof(comm));
+int BPF_KPROBE(handle_hook){
 
-    if (comm[0]  != 'p' || comm[1]  != 'a' || comm[2]  != 'g' || comm[3]  != 'e' ||
-        comm[4]  != '_' || comm[5]  != 'f' || comm[6]  != 'a' || comm[7]  != 'u' ||
-        comm[8]  != 'l' || comm[9]  != 't' || comm[10] != '_' || comm[11] != 'g' ||
-        comm[12] != 'e' || comm[13] != 'n')
-        return 0;
+    struct task_struct *task= (struct task_struct *)bpf_get_current_task();
+    char task_name[16]; 
+    BPF_CORE_READ_STR_INTO(&task_name, task, comm); 
+    
+    if(__builtin_memcmp(task_name, "page_fault_gen", 14) == 0){
 
-    __u64 now = bpf_ktime_get_ns();
-    __u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+        // récuperer les options 
+        // lower_bound_freq_ms
+        __u32 key = 0;
+        __u32 *lower_bound_freq_ms = bpf_map_lookup_elem(&options, &key);
+        if(!lower_bound_freq_ms){
+            return 0; 
+        }
 
-    /* ---- 2. Read current state ---- */
-    __u32 k0 = 0, k1 = 1, k2 = 2;
-
-    __u32 *head_p  = bpf_map_lookup_elem(&state, &k0);
-    __u32 *total_p = bpf_map_lookup_elem(&state, &k1);
-    __u32 *pid_p   = bpf_map_lookup_elem(&state, &k2);
-    __u64 *fts_p   = bpf_map_lookup_elem(&first_ts, &k0);
-    if (!head_p || !total_p || !pid_p || !fts_p)
-        return 0;
-
-    __u32 head  = *head_p;
-    __u32 total = *total_p;
-
-    /* Record PID and first-fault timestamp on the very first fault */
-    if (*pid_p == 0)
-        bpf_map_update_elem(&state, &k2, &pid, BPF_ANY);
-    if (*fts_p == 0)
-        bpf_map_update_elem(&first_ts, &k0, &now, BPF_ANY);
-
-    /* ---- 3. Write current timestamp into circular buffer ---- */
-    bpf_map_update_elem(&timestamps, &head, &now, BPF_ANY);
-
-    /* ---- 4. Advance head and total ---- */
-    __u32 new_head  = (head + 1 >= MAX_FAULTS) ? 0 : head + 1;
-    __u32 new_total = (total >= MAX_FAULTS) ? MAX_FAULTS : total + 1;
-    bpf_map_update_elem(&state, &k0, &new_head,  BPF_ANY);
-    bpf_map_update_elem(&state, &k1, &new_total, BPF_ANY);
-
-    /* ---- 5. Upper-bound check ---- *
-     *
-     * Key idea: we have >= upper_count faults in window_ns if and only if
-     * the upper_count-th most recent fault (the "oldest" of the last
-     * upper_count faults, including the current one) is still within
-     * window_ns.  That slot is at index:
-     *   (new_head - upper_count + MAX_FAULTS) % MAX_FAULTS
-     * No loop needed — pure O(1).
-     */
-    __u32 *upper_p  = bpf_map_lookup_elem(&options, &k1); /* upper_bound_freq_ms */
-    __u32 *window_p = bpf_map_lookup_elem(&options, &k2); /* time_window_ms      */
-    if (!upper_p || !window_p)
-        return 0;
-
-    __u32 upper_count = (*upper_p) * (*window_p);
-    if (upper_count == 0 || upper_count > MAX_FAULTS)
-        return 0;
-
-    __u64 window_ns = (__u64)(*window_p) * 1000000ULL; /* ms → ns */
-
-    if (new_total >= upper_count) {
-        __u32 old_slot = (new_head + MAX_FAULTS - upper_count) % MAX_FAULTS;
-        /* Explicit bound check so the verifier is happy */
-        if (old_slot >= MAX_FAULTS)
+        // upper_bound_freq_ms 
+        key = 1;
+        __u32 *upper_bound_freq_ms  = bpf_map_lookup_elem(&options, &key);
+        if(!upper_bound_freq_ms){
             return 0;
-        __u64 *old_ts_p = bpf_map_lookup_elem(&timestamps, &old_slot);
-        if (old_ts_p && (now - *old_ts_p) < window_ns) {
-            struct event e = { .pid = pid, .type = EVENT_TOO_HIGH };
+        }
+
+        // time_window_ms
+        key = 2;
+        __u32 *time_window_ms  = bpf_map_lookup_elem(&options, &key);
+        if(!time_window_ms){
+            return 0;
+        }
+
+        // récuperer le timestamp actuel
+        __u64 timestamp = bpf_ktime_get_ns();
+
+        // récupérer l'index courant 
+        key = 0;
+        __u32 *index = bpf_map_lookup_elem(&window_index, &key); 
+        if(!index){
+            return 0;
+        }
+
+        // récupérer le compteur 
+        key = 0;
+        __u32 *count = bpf_map_lookup_elem(&pf_count, &key);
+        if(!count){
+            return 0;
+        };
+
+                
+        // récupérer le flag 
+        key = 0;
+        __u32 *flag = bpf_map_lookup_elem(&too_high_flag, &key);
+        if(!flag){
+            return 0;
+        }
+
+        __u32 pid = bpf_get_current_pid_tgid() >> 32;
+        __u64 upper_bound_count = (__u64)*upper_bound_freq_ms * (__u64)*time_window_ms;
+        __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
+
+
+        // vérifier si la fenêtre est remplie 
+        if(*count < upper_bound_count ) { 
+            // écrire le timestamps à l'index courant 
+            key = *count; 
+            bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
+            (*count)++;
+            (*index)++; 
+            return 0; 
+        } else {
+
+            // la map est remplie 
+            __u32 old_index = (*index) % upper_bound_count;
+            key = old_index;
+
+            // timestamp le plus vieux 
+            __u64 *old_timestamp = bpf_map_lookup_elem(&timestamps,&key); 
+            if(!old_timestamp){
+                return 0; 
+            }
+
+            __u64 delta =  timestamp - *old_timestamp;
+
+
+            if(delta < window_ns ){
+                if(*flag == 0){
+                    // too high → envoyer message
+                    struct event e = {.pid = pid, .type = 1};
+                    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
+                    *flag = 1;
+                }
+    
+            } else {
+                *flag = 0;
+            }
+
+                // mettre à jour la fenêtre 
+                key = old_index; 
+                bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
+                *index = (*index + 1) % upper_bound_count;
+        }
+
+        // throttling : envoyer EVENT_PF_TS max 1 fois par ms
+        key = 0;
+         __u64 *last_sent = bpf_map_lookup_elem(&last_pf_ts_sent, &key);
+        if (!last_sent) return 0;
+        
+        if (timestamp - *last_sent >= 1000000ULL) {
+            struct event e = {
+                .pid = pid,
+                .type = EVENT_PF_TS,
+                .timestamp = timestamp
+            };
             bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
-                                  &e, sizeof(e));
+                                          &e, sizeof(e));
+            *last_sent = timestamp;
         }
     }
-
     return 0;
 }
