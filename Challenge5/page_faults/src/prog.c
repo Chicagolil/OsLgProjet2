@@ -49,7 +49,10 @@ void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz){
     else if(e->type == EVENT_PF_TS) {
         monitored_pid = e->pid;
         if(first_pf_time == 0) first_pf_time = e->timestamp;
-        next_check_ns = e->timestamp + window_ns_g;  // ← toujours mettre à jour
+        
+        // ✅ planifier seulement si pas déjà planifié !
+        if(next_check_ns == 0)
+            next_check_ns = e->timestamp + window_ns_g;
     }
 
 }
@@ -203,12 +206,13 @@ int main(int argc, char **argv) {
                 count_in_window++;
         }
         
-        if (count_in_window < lower_bound_count_g) {
+        // après le check dans la boucle while
+        if(count_in_window < lower_bound_count_g) {
             printf("PFF too low for process with PID %d\n", monitored_pid);
             fflush(stdout);
         }
-        
-        // ✅ replanifier le prochain check dans T ms
+
+        // ✅ replanifier le prochain check
         next_check_ns = now_ns() + window_ns_g;
     }
     
