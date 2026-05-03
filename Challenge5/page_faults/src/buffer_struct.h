@@ -1,13 +1,14 @@
 #ifndef BUFFER_STRUCT_H
 #define BUFFER_STRUCT_H
 
-#define EVENT_TOO_HIGH 1
-#define EVENT_PF_TS    0
+/* Event types sent from kernel to user space via perf buffer */
+#define EVENT_PF_TS    0   /* page-fault timestamp  → user space handles "too low" */
+#define EVENT_TOO_HIGH 1   /* PFF exceeded upper bound (detected in kernel)         */
 
 struct event {
-    __u32 pid;      // PID du processus
-    __u32 type;     // 0 = too low, 1 = too high
-    __u64 timestamp; 
+    __u32 pid;        /* PID of page_fault_gen                  */
+    __u32 type;       /* EVENT_PF_TS or EVENT_TOO_HIGH           */
+    __u64 timestamp;  /* bpf_ktime_get_ns() at fault time        */
 };
 
-#endif
+#endif /* BUFFER_STRUCT_H */
