@@ -133,7 +133,11 @@ int BPF_KPROBE(handle_hook){
         }
         __u64 delta =  timestamp - *old_timestamp;
         __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
-        if(delta < window_ns ){
+
+        __u64 upper_threshold = window_ns;
+        __u64 lower_threshold = window_ns * 9 / 10;  // 90% du seuil
+
+        if(delta < upper_threshold ){
             if(*flag == 0){
                 // too high → envoyer message
                 __u32 pid = bpf_get_current_pid_tgid() >> 32;
@@ -142,7 +146,7 @@ int BPF_KPROBE(handle_hook){
                 *flag = 1;
             }
 
-        } else {
+        } else if(delta > lower_threshold) {
             *flag = 0;
         }
        
