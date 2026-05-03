@@ -229,6 +229,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "Polling error %d\n", err);
             break;
         }
+        fprintf("caca partout");
         check_lower_bound(state_fd, first_ts_fd, timestamps_fd,
                           lower_bound_freq_ms, time_window_ms);
     }
