@@ -126,7 +126,7 @@ int BPF_KPROBE(handle_hook){
         }
         
         // récupérer le flag 
-        __u32 key = 0;
+        key = 0;
         __u32 *flag = bpf_map_lookup_elem(&too_high_flag, &key);
         if(!flag){
             return 0;
