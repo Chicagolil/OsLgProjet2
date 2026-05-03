@@ -174,7 +174,7 @@ int BPF_KPROBE(handle_hook){
          __u64 *last_sent = bpf_map_lookup_elem(&last_pf_ts_sent, &key);
         if (!last_sent) return 0;
         
-        if (timestamp - *last_sent >= 1000000ULL) {
+        if(timestamp - *last_sent >= 10000000ULL) {
             struct event e = {
                 .pid = pid,
                 .type = EVENT_PF_TS,

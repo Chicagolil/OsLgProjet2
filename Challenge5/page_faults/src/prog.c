@@ -9,7 +9,6 @@
 #include <time.h>
 #include <bpf/bpf.h>  
 
-
 static volatile int running = 1;
 
 static void handle_sig(int sig) {
