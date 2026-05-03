@@ -1,159 +1,141 @@
-#include <stdio.h>
-#include <unistd.h>
-#include <errno.h>
-#include <signal.h>
-#include <bpf/libbpf.h>
-#include <getopt.h>
-#include <stdlib.h>
+// SPDX-License-Identifier: GPL-2.0
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
 #include "buffer_struct.h"
 
-static volatile int running = 1;
+char LICENSE[] SEC("license") = "GPL";
 
-static void handle_sig(int sig) {
-    running = 0;
-}
+/*
+ * options[0] = lower_bound_freq_ms
+ * options[1] = upper_bound_freq_ms
+ * options[2] = time_window_ms
+ * (filled by user space before attachment)
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 3);
+    __type(key, __u32);
+    __type(value, __u32);
+} options SEC(".maps");
 
-static struct option long_options[] = {
-    {"lower_bound_freq_ms",required_argument, 0,'l'},
-    {"upper_bound_freq_ms", required_argument, 0, 'u'},
-    {"time_window_ms", required_argument, 0, 't'},
-    {0,0,0,0}
-};
+/*
+ * Circular buffer: timestamps[i] = nanosecond timestamp of the fault
+ * stored in slot i.  Indexed by head in [0, MAX_FAULTS).
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, MAX_FAULTS);
+    __type(key, __u32);
+    __type(value, __u64);
+} timestamps SEC(".maps");
 
-void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz){
-    const struct event *e = data;
-    if(e->type == 1){ 
-        printf("PFF too high for process with PID %d\n", e->pid);
-    }
-    if(e->type == 0){ 
-        printf("PFF too low for process with PID %d\n", e->pid);
-    }
+/*
+ * state[0] = head        — next write slot, wraps in [0, MAX_FAULTS)
+ * state[1] = total_count — total faults seen, capped at MAX_FAULTS
+ * state[2] = target_pid  — PID of page_fault_gen (0 until first fault)
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 3);
+    __type(key, __u32);
+    __type(value, __u32);
+} state SEC(".maps");
 
-}
+/*
+ * first_ts[0] = nanosecond timestamp of the very first observed fault.
+ * Used by user space to skip the startup phase for lower-bound checks.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} first_ts SEC(".maps");
 
-void handle_lost(void *ctx, int cpu, __u64 lost_cnt){
-    printf("Lost %llu events on CPU %d\n", lost_cnt, cpu);
-}
+/* Perf output — carries EVENT_TOO_HIGH events to user space */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
+} events SEC(".maps");
 
-int main(int argc, char **argv) {
-    struct bpf_object *obj;
-    struct bpf_program *prog;
-    struct bpf_link *link;
-    int err;
+SEC("kprobe/handle_mm_fault")
+int handle_hook(struct pt_regs *ctx)
+{
+    /* ---- 1. Filter by process name "page_fault_gen" (14 chars) ---- */
+    char comm[16];
+    bpf_get_current_comm(comm, sizeof(comm));
 
-    // Open the BPF object file (kernel compiled BPF program)
-    obj = bpf_object__open_file("prog.bpf.o", NULL);
-    if (!obj) {
-        perror("bpf_object__open_file");
-        return 1;
-    }
-    // Load the BPF object file into the kernel
-    err = bpf_object__load(obj);
-    if (err) {
-        perror("bpf_object__load");
-        bpf_object__close(obj);   // clean up on error
-        return 1;
-    }
+    if (comm[0]  != 'p' || comm[1]  != 'a' || comm[2]  != 'g' || comm[3]  != 'e' ||
+        comm[4]  != '_' || comm[5]  != 'f' || comm[6]  != 'a' || comm[7]  != 'u' ||
+        comm[8]  != 'l' || comm[9]  != 't' || comm[10] != '_' || comm[11] != 'g' ||
+        comm[12] != 'e' || comm[13] != 'n')
+        return 0;
 
-    // parser les arguments 
-    int opt; 
-    int lower_bound_freq_ms = 10; //défaut
-    int upper_bound_freq_ms = 100; //défaut 
-    int time_window_ms = 50; //défaut 
+    __u64 now = bpf_ktime_get_ns();
+    __u32 pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
 
-    while((opt = getopt_long(argc, argv,"u:l:t:",long_options, NULL)) != -1){
-        switch(opt){
-            case 'l' : 
-                lower_bound_freq_ms = atoi(optarg); 
-                break;
-            case 'u' : 
-                upper_bound_freq_ms = atoi(optarg); 
-                break; 
-            case 't' : 
-                time_window_ms = atoi(optarg); 
-                break; 
+    /* ---- 2. Read current state ---- */
+    __u32 k0 = 0, k1 = 1, k2 = 2;
+
+    __u32 *head_p  = bpf_map_lookup_elem(&state, &k0);
+    __u32 *total_p = bpf_map_lookup_elem(&state, &k1);
+    __u32 *pid_p   = bpf_map_lookup_elem(&state, &k2);
+    __u64 *fts_p   = bpf_map_lookup_elem(&first_ts, &k0);
+    if (!head_p || !total_p || !pid_p || !fts_p)
+        return 0;
+
+    __u32 head  = *head_p;
+    __u32 total = *total_p;
+
+    /* Record PID and first-fault timestamp on the very first fault */
+    if (*pid_p == 0)
+        bpf_map_update_elem(&state, &k2, &pid, BPF_ANY);
+    if (*fts_p == 0)
+        bpf_map_update_elem(&first_ts, &k0, &now, BPF_ANY);
+
+    /* ---- 3. Write current timestamp into circular buffer ---- */
+    bpf_map_update_elem(&timestamps, &head, &now, BPF_ANY);
+
+    /* ---- 4. Advance head and total ---- */
+    __u32 new_head  = (head + 1 >= MAX_FAULTS) ? 0 : head + 1;
+    __u32 new_total = (total >= MAX_FAULTS) ? MAX_FAULTS : total + 1;
+    bpf_map_update_elem(&state, &k0, &new_head,  BPF_ANY);
+    bpf_map_update_elem(&state, &k1, &new_total, BPF_ANY);
+
+    /* ---- 5. Upper-bound check ---- *
+     *
+     * Key idea: we have >= upper_count faults in window_ns if and only if
+     * the upper_count-th most recent fault (the "oldest" of the last
+     * upper_count faults, including the current one) is still within
+     * window_ns.  That slot is at index:
+     *   (new_head - upper_count + MAX_FAULTS) % MAX_FAULTS
+     * No loop needed — pure O(1).
+     */
+    __u32 *upper_p  = bpf_map_lookup_elem(&options, &k1); /* upper_bound_freq_ms */
+    __u32 *window_p = bpf_map_lookup_elem(&options, &k2); /* time_window_ms      */
+    if (!upper_p || !window_p)
+        return 0;
+
+    __u32 upper_count = (*upper_p) * (*window_p);
+    if (upper_count == 0 || upper_count > MAX_FAULTS)
+        return 0;
+
+    __u64 window_ns = (__u64)(*window_p) * 1000000ULL; /* ms → ns */
+
+    if (new_total >= upper_count) {
+        __u32 old_slot = (new_head + MAX_FAULTS - upper_count) % MAX_FAULTS;
+        /* Explicit bound check so the verifier is happy */
+        if (old_slot >= MAX_FAULTS)
+            return 0;
+        __u64 *old_ts_p = bpf_map_lookup_elem(&timestamps, &old_slot);
+        if (old_ts_p && (now - *old_ts_p) < window_ns) {
+            struct event e = { .pid = pid, .type = EVENT_TOO_HIGH };
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+                                  &e, sizeof(e));
         }
     }
-
-    // map des options 
-    struct bpf_map *options = bpf_object__find_map_by_name(obj, "options");
-    if(!options){
-        fprintf(stderr, "map not found\n");
-        bpf_object__close(obj); 
-        return -1; 
-    }
-
-
-    __u32 key = 0; 
-    __u32 val = (__u32)lower_bound_freq_ms; 
-    bpf_map__update_elem(options, &key, sizeof(key), &val, sizeof(val), BPF_ANY);
-
-    key = 1;
-    val = (__u32)upper_bound_freq_ms;
-    bpf_map__update_elem(options, &key, sizeof(key), &val, sizeof(val), BPF_ANY); 
-
-    key = 2;
-    val = (__u32)time_window_ms;
-    bpf_map__update_elem(options, &key, sizeof(key), &val, sizeof(val), BPF_ANY); 
-
-    
-
-    // Find the BPF program by name
-    prog = bpf_object__find_program_by_name(obj, "handle_hook");
-    if (!prog) {
-        fprintf(stderr, "program not found\n");
-        bpf_object__close(obj);   // clean up on error
-        return 1;
-    }
-
-    // Attach the BPF program to the appropriate hook (e.g., tracepoint, kprobe)
-    link = bpf_program__attach(prog);
-    if (!link) {
-        perror("bpf_program__attach");
-        bpf_object__close(obj);   // clean up on error
-        return 1;
-    }
-
-    signal(SIGINT, handle_sig);
-    signal(SIGTERM, handle_sig);
-
-    printf("PFF monitor: lower = %d hz, upper = %d hz, window = %d ms\nMonitoring started (filtering by process name). Press Ctrl+C to stop.\n",lower_bound_freq_ms,upper_bound_freq_ms,time_window_ms );
-
-    int perf_map_fd = bpf_object__find_map_fd_by_name(obj, "events");
-    if (perf_map_fd < 0) {
-        fprintf(stderr, "Failed to find perf BPF map: %s\n", strerror(errno));
-        bpf_link__destroy(link);
-        bpf_object__close(obj);
-        return 1;
-    }
-    
-    struct perf_buffer *pb = perf_buffer__new(
-        perf_map_fd,
-        8,            // number of pages for the buffer (you can keep it at 8 for the project)
-        handle_event, // This function will be called for each event received
-        handle_lost,  // This function will be called if events are lost
-        NULL,
-        NULL);
-    
-    if (!pb) {
-        fprintf(stderr, "Failed to create perf buffer: %s\n", strerror(errno));
-        bpf_link__destroy(link);
-        bpf_object__close(obj);
-        return 1;
-    }
-    
-    while (running) {
-        err = perf_buffer__poll(pb, 100 /* timeout in ms */);
-        if (err < 0 && err != -EINTR) {
-            printf("Polling error %d\n", err);
-            break;
-        }
-    }
-    
-    perf_buffer__free(pb);
-    // Cleanup
-    bpf_link__destroy(link);   // detaches the program from the hook
-    bpf_object__close(obj);    // unloads and frees the BPF object
 
     return 0;
 }
