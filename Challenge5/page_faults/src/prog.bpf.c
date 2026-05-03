@@ -135,7 +135,7 @@ int BPF_KPROBE(handle_hook){
         __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
 
         __u64 upper_threshold = window_ns;
-        __u64 lower_threshold = window_ns * 9 / 10;  // 90% du seuil
+        __u64 lower_threshold = window_ns * 5 / 10;  // 90% du seuil
 
         if(delta < upper_threshold ){
             if(*flag == 0){
