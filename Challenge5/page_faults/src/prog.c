@@ -11,103 +11,26 @@
 #include "buffer_struct.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Configuration (set from CLI, read by callbacks)
+ * Configuration
  * ═══════════════════════════════════════════════════════════════════════════ */
 static int cfg_lower_freq_ms = 10;
 static int cfg_upper_freq_ms = 100;
 static int cfg_window_ms     = 50;
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * User-space timestamp ring buffer
- *
- * Holds the last MAX_TS fault timestamps (kernel CLOCK_MONOTONIC ns).
- * Used by process_deadlines() to count faults inside a window.
- * ═══════════════════════════════════════════════════════════════════════════ */
-#define MAX_TS 10001   /* upper_bound_count <= 10000 per spec */
-
-static uint64_t ts_ring[MAX_TS];
-static int      ts_head  = 0;   /* next write slot                  */
-static int      ts_count = 0;   /* valid entries, 0 .. MAX_TS       */
-
-static void ts_add(uint64_t ts)
-{
-    ts_ring[ts_head] = ts;
-    ts_head = (ts_head + 1) % MAX_TS;
-    if (ts_count < MAX_TS) ts_count++;
-    /* if full the oldest entry is silently overwritten – that is fine
-     * because entries older than win_ns will never be counted anyway  */
-}
-
-/*
- * Count timestamps t with  win_start <= t <= win_end.
- *
- * Entries are stored in approximate chronological order (a single-threaded
- * process generates faults on one CPU).  We iterate oldest-to-newest and
- * break early once we pass win_end.
- */
-static int ts_count_in(uint64_t win_start, uint64_t win_end)
-{
-    int cnt   = 0;
-    int start = ((ts_head - ts_count) % MAX_TS + MAX_TS) % MAX_TS;
-
-    for (int i = 0; i < ts_count; i++) {
-        uint64_t t = ts_ring[(start + i) % MAX_TS];
-        if (t < win_start) continue;
-        if (t > win_end)   break;   /* entries are sorted → done */
-        cnt++;
-    }
-    return cnt;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Deadline queue
- *
- * Each page fault at time T schedules one "too low" check at T + win_ns.
- * At that check we look at [T, T+win_ns]: if fewer than lower_bound_count
- * faults are found, the PFF was below the lower bound during that window.
- *
- * Using one deadline per fault (not just the last one) is the key to
- * detecting a PFF that is below the lower bound but still regular enough
- * that consecutive faults are closer than win_ns apart.
- * ═══════════════════════════════════════════════════════════════════════════ */
-typedef struct { uint64_t win_start; uint64_t deadline; } dl_entry_t;
-
-#define MAX_DL 10001   /* one entry per fault; upper_bound_count <= 10000 */
-
-static dl_entry_t dq[MAX_DL];
-static int        dq_tail = 0;   /* read  (oldest) */
-static int        dq_head = 0;   /* write (newest) */
-
-static inline int  dq_empty(void) { return dq_head == dq_tail; }
-static inline int  dq_full(void)  { return (dq_head + 1) % MAX_DL == dq_tail; }
-
-static void dq_push(uint64_t win_start, uint64_t deadline)
-{
-    if (dq_full()) {
-        /* Drop the oldest pending deadline rather than blocking.
-         * This should not happen in normal operation (MAX_DL > upper_count). */
-        dq_tail = (dq_tail + 1) % MAX_DL;
-    }
-    dq[dq_head].win_start = win_start;
-    dq[dq_head].deadline  = deadline;
-    dq_head = (dq_head + 1) % MAX_DL;
-}
-
-static dl_entry_t *dq_front(void) { return dq_empty() ? NULL : &dq[dq_tail]; }
-static void        dq_pop(void)   { if (!dq_empty()) dq_tail = (dq_tail + 1) % MAX_DL; }
-
-/* ═══════════════════════════════════════════════════════════════════════════
  * Monitoring state
  * ═══════════════════════════════════════════════════════════════════════════ */
-static volatile int running    = 1;
-static uint64_t     first_fault = 0;   /* kernel-ns of first observed fault */
-static int          mon_pid    = -1;
+static volatile int running         = 1;
+static uint64_t     first_fault_ns  = 0;   /* kernel-time of first fault     */
+static uint64_t     last_fault_ns   = 0;   /* kernel-time of most recent fault */
+static uint64_t     deadline_ns     = UINT64_MAX; /* when to run "no-fault" check */
+static int          mon_pid         = -1;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Current CLOCK_MONOTONIC time in nanoseconds – same clock as bpf_ktime_get_ns */
+/* CLOCK_MONOTONIC nanoseconds — same clock as bpf_ktime_get_ns() */
 static uint64_t now_ns(void)
 {
     struct timespec tp;
@@ -116,37 +39,50 @@ static uint64_t now_ns(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Signal handler
+ * Signal
  * ═══════════════════════════════════════════════════════════════════════════ */
 static void handle_sig(int sig) { running = 0; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Perf-buffer event callback
+ * Perf-buffer callbacks
  * ═══════════════════════════════════════════════════════════════════════════ */
 static void handle_event(void *ctx, int cpu, void *data, unsigned int sz)
 {
     const struct event *e = data;
 
     if (e->type == EVENT_TOO_HIGH) {
-        /* Detected in kernel space – just print. */
+        /* Detected in kernel — just print */
         printf("PFF too high for process with PID %d\n", e->pid);
         fflush(stdout);
         return;
     }
 
+    if (e->type == EVENT_TOO_LOW) {
+        /*
+         * Detected in kernel at fault time.
+         * Handles: PFF slightly below lower bound (regular-but-too-slow faults).
+         * The startup guard is enforced in the BPF program.
+         */
+        printf("PFF too low for process with PID %d\n", e->pid);
+        fflush(stdout);
+        if (mon_pid < 0) mon_pid = (int)e->pid;
+        return;
+    }
+
     if (e->type == EVENT_PF_TS) {
+        /*
+         * Throttled heartbeat: one event every win_ns/2 at most.
+         * Used only to keep `last_fault_ns` fresh so we can schedule
+         * the "no-fault" deadline correctly.
+         */
         uint64_t ts     = e->timestamp;
         uint64_t win_ns = (uint64_t)cfg_window_ms * 1000000ULL;
 
-        /* Initialise on first fault */
-        if (first_fault == 0) first_fault = ts;
-        if (mon_pid < 0)      mon_pid     = (int)e->pid;
+        if (first_fault_ns == 0) first_fault_ns = ts;
+        if (mon_pid < 0)         mon_pid         = (int)e->pid;
 
-        /* Add to the timestamp ring (used by the deadline checker) */
-        ts_add(ts);
-
-        /* Schedule one "too low" check at ts + win_ns */
-        dq_push(ts, ts + win_ns);
+        last_fault_ns = ts;
+        deadline_ns   = ts + win_ns;   /* single deadline: re-armed on every heartbeat */
     }
 }
 
@@ -156,55 +92,70 @@ static void handle_lost(void *ctx, int cpu, uint64_t lost)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Deadline processor – called from the main loop after every poll()
+ * "No-fault" deadline check
  *
- * For each expired deadline (win_start, win_start + win_ns):
- *   • Skip if still in the startup phase (< one full window since first fault).
- *   • Count faults recorded in [win_start, deadline].
- *   • Print "too low" if count < lower_bound_count.
+ * Handles the case where the generator has stopped (or paused for > win_ns).
+ * The BPF program already handles "PFF slightly below lower bound" at fault
+ * time, so here we only need to fire once when no fault has occurred for an
+ * entire window.
  * ═══════════════════════════════════════════════════════════════════════════ */
-static void process_deadlines(void)
+static void check_deadline(void)
 {
+    if (deadline_ns == UINT64_MAX || mon_pid < 0)
+        return;
+
     uint64_t cur    = now_ns();
     uint64_t win_ns = (uint64_t)cfg_window_ms * 1000000ULL;
-    int      lb     = cfg_lower_freq_ms * cfg_window_ms;   /* lower_bound_count */
 
-    while (!dq_empty()) {
-        dl_entry_t *d = dq_front();
+    if (cur < deadline_ns)
+        return;
 
-        if (cur < d->deadline) break;   /* FIFO order → no later entry expired */
-
-        /*
-         * Startup guard: do not evaluate until at least one full window has
-         * elapsed since the very first observed fault.
-         */
-        if (first_fault > 0 && d->deadline - first_fault >= win_ns) {
-            int cnt = ts_count_in(d->win_start, d->deadline);
-            if (cnt < lb) {
-                printf("PFF too low for process with PID %d\n", mon_pid);
-                fflush(stdout);
-            }
-        }
-
-        dq_pop();
+    /* Startup guard: skip until one full window has passed since first fault */
+    if (first_fault_ns == 0 || deadline_ns - first_fault_ns < win_ns) {
+        deadline_ns = UINT64_MAX;
+        return;
     }
+
+    /*
+     * A full window elapsed since the last heartbeat without a new heartbeat
+     * arriving → the generator produced 0 (or very few) faults → too low.
+     */
+    printf("PFF too low for process with PID %d\n", mon_pid);
+    fflush(stdout);
+
+    deadline_ns = UINT64_MAX;   /* disarm; re-armed by next EVENT_PF_TS */
 }
 
-/* Milliseconds until the next deadline fires (drives perf_buffer__poll timeout) */
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Poll timeout
+ * ═══════════════════════════════════════════════════════════════════════════ */
 static int next_timeout_ms(void)
 {
-    if (dq_empty()) return 100;   /* no pending deadline: use a safe default */
+    int timeout_ms = 100;   /* default when no deadline is pending */
 
-    uint64_t dl  = dq_front()->deadline;
-    uint64_t cur = now_ns();
+    if (deadline_ns != UINT64_MAX) {
+        uint64_t cur = now_ns();
+        if (cur >= deadline_ns) {
+            timeout_ms = 0;
+        } else {
+            uint64_t diff = deadline_ns - cur;
+            timeout_ms = (int)(diff / 1000000ULL);
+            if (timeout_ms < 1) timeout_ms = 1;
+        }
+    }
 
-    if (cur >= dl) return 0;   /* already expired */
+    /*
+     * Hard cap: even without a pending deadline we must drain the perf
+     * buffer frequently enough.  EVENT_PF_TS is throttled in BPF, but
+     * EVENT_TOO_HIGH / EVENT_TOO_LOW bursts are possible.
+     * Cap at window_ms / 5 (at least 1 ms) to stay comfortably below
+     * the buffer capacity.
+     */
+    int cap_ms = cfg_window_ms / 5;
+    if (cap_ms < 1)  cap_ms = 1;
+    if (timeout_ms > cap_ms) timeout_ms = cap_ms;
 
-    uint64_t diff_ns = dl - cur;
-    int ms = (int)(diff_ns / 1000000ULL);
-    if (ms < 1)   ms = 1;
-    if (ms > 100) ms = 100;   /* cap so we stay responsive to signals */
-    return ms;
+    return timeout_ms;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -243,7 +194,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* ── Populate the options map ── */
+    /* ── Populate options map ── */
     struct bpf_map *opt_map = bpf_object__find_map_by_name(obj, "options");
     if (!opt_map) {
         fprintf(stderr, "map 'options' not found\n");
@@ -258,7 +209,7 @@ int main(int argc, char **argv)
     k = 2; v = (__u32)cfg_window_ms;
     bpf_map__update_elem(opt_map, &k, sizeof(k), &v, sizeof(v), BPF_ANY);
 
-    /* ── Attach the BPF program ── */
+    /* ── Attach BPF program ── */
     struct bpf_program *prog = bpf_object__find_program_by_name(obj, "handle_hook");
     if (!prog) {
         fprintf(stderr, "program 'handle_hook' not found\n");
@@ -275,13 +226,12 @@ int main(int argc, char **argv)
     signal(SIGINT,  handle_sig);
     signal(SIGTERM, handle_sig);
 
-    /* Print config – format matches the expected output in the spec */
     printf("PFF monitor: lower=%d, upper=%d, window=%dms\n",
            cfg_lower_freq_ms, cfg_upper_freq_ms, cfg_window_ms);
     printf("Monitoring started (filtering by process name). Press Ctrl+C to stop.\n");
     fflush(stdout);
 
-    /* ── Set up perf buffer ── */
+    /* ── Perf buffer ── */
     int pfd = bpf_object__find_map_fd_by_name(obj, "events");
     if (pfd < 0) {
         fprintf(stderr, "Failed to find perf map: %s\n", strerror(errno));
@@ -299,22 +249,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* ── Main loop ────────────────────────────────────────────────────────
-     *
-     * The poll timeout is set to the time remaining until the next deadline.
-     * This means the loop wakes up precisely when it needs to check "too low",
-     * rather than at a fixed 10 ms interval (which would incur a -1/20 penalty).
-     * ─────────────────────────────────────────────────────────────────── */
+    /* ── Main loop ── */
     while (running) {
         err = perf_buffer__poll(pb, next_timeout_ms());
         if (err < 0 && err != -EINTR) {
             fprintf(stderr, "Polling error %d\n", err);
             break;
         }
-        process_deadlines();
+        check_deadline();
     }
 
-    /* ── Cleanup ── */
     perf_buffer__free(pb);
     bpf_link__destroy(link);
     bpf_object__close(obj);
