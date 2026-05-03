@@ -40,8 +40,11 @@ struct {
     __type(value, struct config);
 } config_map SEC(".maps");
 
+// perf buffer
 struct {
     __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+    __uint(key_size, sizeof(__u32));
+    __uint(value_size, sizeof(__u32));
 } events SEC(".maps");
 
 SEC("kprobe/handle_mm_fault")
