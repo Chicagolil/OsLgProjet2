@@ -56,6 +56,17 @@ struct {
     __type(value, __u32);
 } too_high_flag SEC(".maps");
 
+
+
+// Dernier timestamp envoyé (pour throttling)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} last_pf_ts_sent SEC(".maps");
+
+
 SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(handle_hook){
 
@@ -104,8 +115,20 @@ int BPF_KPROBE(handle_hook){
             return 0;
         };
 
-        // vérifier si la fenêtre est remplie 
+                
+        // récupérer le flag 
+        key = 0;
+        __u32 *flag = bpf_map_lookup_elem(&too_high_flag, &key);
+        if(!flag){
+            return 0;
+        }
+
+        __u32 pid = bpf_get_current_pid_tgid() >> 32;
         __u64 upper_bound_count = (__u64)*upper_bound_freq_ms * (__u64)*time_window_ms;
+        __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
+
+
+        // vérifier si la fenêtre est remplie 
         if(*count < upper_bound_count ) { 
             // écrire le timestamps à l'index courant 
             key = *count; 
@@ -113,43 +136,54 @@ int BPF_KPROBE(handle_hook){
             (*count)++;
             (*index)++; 
             return 0; 
-        }
+        } else {
 
-        // la map est remplie 
-        __u32 old_index = (*index) % upper_bound_count;
-        key = old_index;
+            // la map est remplie 
+            __u32 old_index = (*index) % upper_bound_count;
+            key = old_index;
 
-        // timestamp le plus vieux 
-        __u64 *old_timestamp = bpf_map_lookup_elem(&timestamps,&key); 
-        if(!old_timestamp){
-            return 0; 
-        }
-        
-        // récupérer le flag 
-        key = 0;
-        __u32 *flag = bpf_map_lookup_elem(&too_high_flag, &key);
-        if(!flag){
-            return 0;
-        }
-        __u64 delta =  timestamp - *old_timestamp;
-        __u64 window_ns = (__u64)(*time_window_ms) * 1000000ULL;
-        if(delta < window_ns ){
-            if(*flag == 0){
-                // too high → envoyer message
-                __u32 pid = bpf_get_current_pid_tgid() >> 32;
-                struct event e = {.pid = pid, .type = 1};
-                bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
-                *flag = 1;
+            // timestamp le plus vieux 
+            __u64 *old_timestamp = bpf_map_lookup_elem(&timestamps,&key); 
+            if(!old_timestamp){
+                return 0; 
             }
 
-        } else {
-            *flag = 0;
+            __u64 delta =  timestamp - *old_timestamp;
+
+
+            if(delta < window_ns ){
+                if(*flag == 0){
+                    // too high → envoyer message
+                    struct event e = {.pid = pid, .type = 1};
+                    bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &e, sizeof(e));
+                    *flag = 1;
+                }
+    
+            } else {
+                *flag = 0;
+            }
+
+                // mettre à jour la fenêtre 
+                key = old_index; 
+                bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
+                *index = (*index + 1) % upper_bound_count;
         }
-       
-        // mettre à jour la fenêtre 
-        key = old_index; 
-        bpf_map_update_elem(&timestamps, &key, &timestamp, BPF_ANY);
-        *index = (*index + 1) % upper_bound_count;
+
+        // throttling : envoyer EVENT_PF_TS max 1 fois par ms
+        key = 0;
+         __u64 *last_sent = bpf_map_lookup_elem(&last_pf_ts_sent, &key);
+        if (!last_sent) return 0;
+        
+        if (timestamp - *last_sent >= 1000000ULL) {
+            struct event e = {
+                .pid = pid,
+                .type = EVENT_PF_TS,
+                .timestamp = timestamp
+            };
+            bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU,
+                                          &e, sizeof(e));
+            *last_sent = timestamp;
+        }
     }
     return 0;
 }
