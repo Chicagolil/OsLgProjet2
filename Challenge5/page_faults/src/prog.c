@@ -113,7 +113,6 @@ int main(int argc, char **argv) {
 
 
     // fd des maps 
-
     struct bpf_map *timestamps    = bpf_object__find_map_by_name(obj, "timestamps");
     struct bpf_map *monitored_pid = bpf_object__find_map_by_name(obj, "monitored_pid");
     struct bpf_map *window_index  = bpf_object__find_map_by_name(obj, "window_index");
@@ -243,7 +242,7 @@ int main(int argc, char **argv) {
 
         if (count < lower_bound_count) {
             __u32 key = 0, pid = 0;
-            if (bpf_map__lookup_elem(monitored_pid, &k, sizeof(k), &pid, sizeof(pid), 0) == 0 && pid != 0) {
+            if (bpf_map__lookup_elem(monitored_pid, &key, sizeof(key), &pid, sizeof(pid), 0) == 0 && pid != 0) {
                 printf("PFF too low for process with PID %d\n", pid);
             }
         }
