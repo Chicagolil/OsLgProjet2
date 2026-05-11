@@ -2,12 +2,14 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
-#include <bpf/libbpf.h>
-#include <getopt.h>
-#include <stdlib.h>
-#include "buffer_struct.h"
 #include <time.h>
-#include <bpf/bpf.h>  
+#include <stdlib.h>
+#include <string.h>
+#include <getopt.h>
+#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+#include "buffer_struct.h"
+
 
 static volatile int running = 1;
 
@@ -30,32 +32,22 @@ static struct option long_options[] = {
     {0,0,0,0}
 };
 
-// variables globales pour le check too_low
-static unsigned long long next_check_ns = 0;
-static unsigned long long first_pf_time = 0;
-static unsigned int       monitored_pid = 0;
-static unsigned long long window_ns_g   = 0;
-static unsigned int       lower_bound_count_g  = 0;
-static unsigned int       upper_bound_count_g  = 0;
-static int                timestamps_fd = -1;
+
 
 void handle_event(void *ctx, int cpu, void *data, unsigned int data_sz){
     const struct event *e = data;
-    if(e->type == EVENT_TOO_HIGH){ 
+    if(e->type == 1){ 
         printf("PFF too high for process with PID %d\n", e->pid);
-        fflush(stdout);
 
     }
-    else if(e->type == EVENT_PF_TS) {
-        monitored_pid = e->pid;
-        if(first_pf_time == 0) first_pf_time = e->timestamp;
-        next_check_ns = e->timestamp + window_ns_g;  // ← toujours mettre à jour
+    else if(e->type == 0) {
+        printf("PFF too low for process with PID %d\n", e->pid);
     }
 
 }
 
 void handle_lost(void *ctx, int cpu, __u64 lost_cnt){
-    printf("Lost %llu events on CPU %d\n", lost_cnt, cpu);
+    fprintf(stderr, "Lost %llu events on CPU %d\n", lost_cnt, cpu);
 }
 
 int main(int argc, char **argv) {
@@ -98,12 +90,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // calcul des bornes globales
-    window_ns_g          = (unsigned long long)time_window_ms * 1000000ULL;
-    lower_bound_count_g  = (unsigned int)lower_bound_freq_ms * (unsigned int)time_window_ms;
-    upper_bound_count_g  = (unsigned int)upper_bound_freq_ms * (unsigned int)time_window_ms;
-    if (upper_bound_count_g > 10000) upper_bound_count_g = 10000;
-
 
     // map des options 
     struct bpf_map *options = bpf_object__find_map_by_name(obj, "options");
@@ -112,7 +98,6 @@ int main(int argc, char **argv) {
         bpf_object__close(obj); 
         return -1; 
     }
-
 
     __u32 key = 0; 
     __u32 val = (__u32)lower_bound_freq_ms; 
@@ -126,13 +111,18 @@ int main(int argc, char **argv) {
     val = (__u32)time_window_ms;
     bpf_map__update_elem(options, &key, sizeof(key), &val, sizeof(val), BPF_ANY); 
 
-    // fd de la map timestamps pour le check too_low
-    timestamps_fd = bpf_object__find_map_fd_by_name(obj, "timestamps");
-    if (timestamps_fd < 0) {
-        fprintf(stderr, "timestamps map not found\n");
+
+    // fd des maps 
+
+    struct bpf_map *timestamps    = bpf_object__find_map_by_name(obj, "timestamps");
+    struct bpf_map *monitored_pid = bpf_object__find_map_by_name(obj, "monitored_pid");
+    struct bpf_map *window_index  = bpf_object__find_map_by_name(obj, "window_index");
+    if (!timestamps || !monitored_pid || !window_index ) {
+        fprintf(stderr, "Required maps not found\n");
         bpf_object__close(obj);
         return 1;
     }
+
 
     // Find the BPF program by name
     prog = bpf_object__find_program_by_name(obj, "handle_hook");
@@ -153,9 +143,10 @@ int main(int argc, char **argv) {
     signal(SIGINT, handle_sig);
     signal(SIGTERM, handle_sig);
 
-    printf("PFF monitor: lower = %d hz, upper = %d hz, window = %d ms\nMonitoring started (filtering by process name). Press Ctrl+C to stop.\n",lower_bound_freq_ms,upper_bound_freq_ms,time_window_ms );
-    fflush(stdout);
+    printf("PFF monitor: lower=%dhz, upper=%dhz, window=%dms\n", lower_bound_freq_ms, upper_bound_freq_ms, time_window_ms);
+    printf("Monitoring started (filtering by process name). Press Ctrl+C to stop.\n");
 
+    // perf buffer
     int perf_map_fd = bpf_object__find_map_fd_by_name(obj, "events");
     if (perf_map_fd < 0) {
         fprintf(stderr, "Failed to find perf BPF map: %s\n", strerror(errno));
@@ -166,9 +157,9 @@ int main(int argc, char **argv) {
     
     struct perf_buffer *pb = perf_buffer__new(
         perf_map_fd,
-        8,            // number of pages for the buffer (you can keep it at 8 for the project)
-        handle_event, // This function will be called for each event received
-        handle_lost,  // This function will be called if events are lost
+        8,            
+        handle_event, 
+        handle_lost,  
         NULL,
         NULL);
     
@@ -179,39 +170,87 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+
+    //  pré-calculs pour le check too low 
+    __u32 upper_bound_count = (__u32)upper_bound_freq_ms * (__u32)time_window_ms;
+    __u32 lower_bound_count = (__u32)lower_bound_freq_ms * (__u32)time_window_ms;
+    __u32 buffer_size       = upper_bound_count + 1;
+    if (buffer_size > 10001){
+        buffer_size = 10001;
+    }
+    unsigned long long window_ns = (unsigned long long)time_window_ms * 1000000ULL;
+
+
+    // Buffer pour lire les timestamps depuis le kernel
+    __u64 *ts_buf = calloc(buffer_size, sizeof(__u64));
+    if (!ts_buf) {
+        perror("calloc");
+        perf_buffer__free(pb); 
+        bpf_link__destroy(link); 
+        bpf_object__close(obj);
+        return 1;
+    }
+
+
+    // gestion du startup phase 
+    unsigned long long first_fault_ts = 0;
+
+    // Check périodique toutes les 10ms
+    const unsigned long long check_interval_ns = 10ULL * 1000000ULL;
+    unsigned long long last_check = 0;
+
     while (running) {
-        err = perf_buffer__poll(pb, 100 /* timeout in ms */);
+        err = perf_buffer__poll(pb, 10);
         if (err < 0 && err != -EINTR) {
             printf("Polling error %d\n", err);
             break;
         }
 
-        if (first_pf_time == 0) continue;
-        if (now_ns() < first_pf_time + window_ns_g) continue;
-        if (next_check_ns == 0 || now_ns() < next_check_ns) continue;
-        
-        // compter les PFs dans [now-T, now]
-        unsigned long long now       = now_ns();
-        unsigned long long win_start = now - window_ns_g;
-        unsigned int count_in_window = 0;
-        
-        for (unsigned int i = 0; i < upper_bound_count_g; i++) {
-            __u32 k  = i;
-            __u64 ts = 0;
-            bpf_map_lookup_elem(timestamps_fd, &k, &ts);
-            if (ts >= win_start && ts <= now)
-                count_in_window++;
+
+        unsigned long long now = now_ns();
+        if (now - last_check < check_interval_ns)
+            continue;
+        last_check = now;
+
+        for (__u32 i = 0; i < buffer_size; i++) {
+            __u64 v = 0;
+            if (bpf_map__lookup_elem(timestamps, &i, sizeof(i),&v, sizeof(v), 0) == 0)
+                ts_buf[i] = v;
+            else
+                ts_buf[i] = 0;
         }
-        
-        if (count_in_window < lower_bound_count_g) {
-            printf("PFF too low for process with PID %d\n", monitored_pid);
-            fflush(stdout);
+
+
+        // Détecte le 1er fault observé (plus petit timestamp non nul)
+        if (first_fault_ts == 0) {
+            for (__u32 i = 0; i < buffer_size; i++) {
+                if (ts_buf[i] != 0 &&
+                    (first_fault_ts == 0 || ts_buf[i] < first_fault_ts))
+                    first_fault_ts = ts_buf[i];
+            }
         }
-        
-        // ✅ replanifier le prochain check dans T ms
-        next_check_ns = now_ns() + window_ns_g;
+
+        if (first_fault_ts == 0 || now < first_fault_ts + window_ns){
+            continue;
+        }
+
+        unsigned long long window_start = now - window_ns;
+        __u32 count = 0;
+        for (__u32 i = 0; i < buffer_size; i++) {
+            if (ts_buf[i] >= window_start && ts_buf[i] <= now)
+                count++;
+        }
+
+        if (count < lower_bound_count) {
+            __u32 key = 0, pid = 0;
+            if (bpf_map__lookup_elem(monitored_pid, &k, sizeof(k), &pid, sizeof(pid), 0) == 0 && pid != 0) {
+                printf("PFF too low for process with PID %d\n", pid);
+            }
+        }
+
     }
     
+    free(ts_buf); 
     perf_buffer__free(pb);
     // Cleanup
     bpf_link__destroy(link);   // detaches the program from the hook
