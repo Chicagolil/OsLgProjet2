@@ -80,7 +80,7 @@ int BPF_KPROBE(handle_hook)
     if (buffer_size > 10001)
         return 0;
 
-    __u64 now       = bpf_ktime_get_ns();
+    __u64 timestamp       = bpf_ktime_get_ns();
     __u64 window_ns = (__u64)window_ms * 1000000ULL;
     __u32 pid       = bpf_get_current_pid_tgid() >> 32;
 
@@ -96,7 +96,7 @@ int BPF_KPROBE(handle_hook)
     // 5. Insertion du timestamp dans le buffer circulaire
     __u32 pos = idx % buffer_size;
     if (pos >= 10001) return 0;  // hint pour le vérifieur
-    bpf_map_update_elem(&timestamps, &pos, &now, BPF_ANY);
+    bpf_map_update_elem(&timestamps, &pos, &timestamp, BPF_ANY);
 
     __u32 new_idx = idx + 1;
     bpf_map_update_elem(&window_index, &zero, &new_idx, BPF_ANY);
@@ -113,7 +113,7 @@ int BPF_KPROBE(handle_hook)
         __u64 *oldest_ts_ptr = bpf_map_lookup_elem(&timestamps, &oldest_pos);
         if (oldest_ts_ptr) {
             __u64 oldest_ts    = *oldest_ts_ptr;
-            __u64 window_start = (now > window_ns) ? now - window_ns : 0;
+            __u64 window_start = (timestamp > window_ns) ? timestamp - window_ns : 0;
             if (oldest_ts >= window_start) {
                 struct event e = {};
                 e.type = 1;
