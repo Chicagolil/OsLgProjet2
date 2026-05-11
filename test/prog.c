@@ -84,10 +84,11 @@ int main(int argc, char **argv)
     key = 2; val = (__u32)time_window_ms;
     bpf_map__update_elem(options, &key, sizeof(key), &val, sizeof(val), BPF_ANY);
 
-    // Récupère les FDs des maps qu'on lit en user space
+    // FDs des maps qu'on lit en user space
     int timestamps_fd    = bpf_object__find_map_fd_by_name(obj, "timestamps");
     int monitored_pid_fd = bpf_object__find_map_fd_by_name(obj, "monitored_pid");
-    if (timestamps_fd < 0 || monitored_pid_fd < 0) {
+    int window_index_fd  = bpf_object__find_map_fd_by_name(obj, "window_index");
+    if (timestamps_fd < 0 || monitored_pid_fd < 0 || window_index_fd < 0) {
         fprintf(stderr, "Required maps not found\n");
         bpf_object__close(obj); return 1;
     }
@@ -125,14 +126,13 @@ int main(int argc, char **argv)
         bpf_link__destroy(link); bpf_object__close(obj); return 1;
     }
 
-    // Pré-calculs pour le check du lower bound
+    // Pré-calculs
     __u32 upper_bound_count = (__u32)upper_bound_freq_ms * (__u32)time_window_ms;
     __u32 lower_bound_count = (__u32)lower_bound_freq_ms * (__u32)time_window_ms;
     __u32 buffer_size       = upper_bound_count + 1;
     if (buffer_size > 10001) buffer_size = 10001;
     unsigned long long window_ns = (unsigned long long)time_window_ms * 1000000ULL;
 
-    // Buffer pour lire les timestamps depuis le kernel
     __u64 *ts_buf = calloc(buffer_size, sizeof(__u64));
     if (!ts_buf) {
         perror("calloc");
@@ -140,62 +140,133 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // Gestion du startup phase : on n'évalue le lower bound qu'après
-    // qu'au moins une fenêtre complète se soit écoulée depuis le 1er fault
+    // Etat
     unsigned long long first_fault_ts = 0;
+    __u32 last_seen_idx = 0;      // dernière valeur de window_index vue
+    unsigned long long next_check_deadline = 0; // 0 = pas planifié
 
-    // Check périodique toutes les 10ms
-    const unsigned long long check_interval_ns = 10ULL * 1000000ULL;
-    unsigned long long last_check = 0;
+    // Helper inline : recalcule la deadline du prochain check lower bound
+    // Renvoie 0 si rien à scheduler (count = 0)
+    #define RECOMPUTE_DEADLINE() do {                                          \
+        unsigned long long _now = now_ns();                                    \
+        unsigned long long _ws  = (_now > window_ns) ? _now - window_ns : 0;   \
+        for (__u32 _i = 0; _i < buffer_size; _i++) {                           \
+            __u64 _v = 0;                                                      \
+            if (bpf_map_lookup_elem(timestamps_fd, &_i, &_v) == 0)             \
+                ts_buf[_i] = _v;                                               \
+            else                                                               \
+                ts_buf[_i] = 0;                                                \
+        }                                                                      \
+        unsigned long long _oldest = 0;                                        \
+        for (__u32 _i = 0; _i < buffer_size; _i++) {                           \
+            if (ts_buf[_i] >= _ws && ts_buf[_i] <= _now) {                     \
+                if (_oldest == 0 || ts_buf[_i] < _oldest)                      \
+                    _oldest = ts_buf[_i];                                      \
+            }                                                                  \
+        }                                                                      \
+        if (_oldest == 0) {                                                    \
+            next_check_deadline = 0;                                           \
+        } else {                                                               \
+            /* +1us pour être sûr que le fault soit sorti de la fenêtre */     \
+            next_check_deadline = _oldest + window_ns + 1000ULL;               \
+        }                                                                      \
+    } while (0)
 
     while (running) {
-        err = perf_buffer__poll(pb, 10);  // timeout 10ms
+        // Calcule le timeout du poll en fonction de la deadline
+        int poll_timeout_ms;
+        unsigned long long now = now_ns();
+        if (next_check_deadline == 0) {
+            // Pas de deadline planifiée. On poll quand même de temps en temps
+            // pour détecter le premier fault et le démarrage de la fenêtre.
+            poll_timeout_ms = 100;
+        } else if (next_check_deadline <= now) {
+            poll_timeout_ms = 0;
+        } else {
+            unsigned long long delta_ns = next_check_deadline - now;
+            unsigned long long delta_ms = delta_ns / 1000000ULL + 1;
+            if (delta_ms > 100) delta_ms = 100;
+            poll_timeout_ms = (int)delta_ms;
+        }
+
+        err = perf_buffer__poll(pb, poll_timeout_ms);
         if (err < 0 && err != -EINTR) {
             fprintf(stderr, "Polling error %d\n", err);
             break;
         }
 
-        unsigned long long now = now_ns();
-        if (now - last_check < check_interval_ns)
-            continue;
-        last_check = now;
+        now = now_ns();
 
-        // Lit l'intégralité du buffer de timestamps
-        for (__u32 i = 0; i < buffer_size; i++) {
-            __u64 v = 0;
-            if (bpf_map_lookup_elem(timestamps_fd, &i, &v) == 0)
-                ts_buf[i] = v;
-            else
-                ts_buf[i] = 0;
-        }
+        // Vérifie si de nouveaux faults sont arrivés (window_index a bougé)
+        __u32 zero = 0, cur_idx = 0;
+        if (bpf_map_lookup_elem(window_index_fd, &zero, &cur_idx) != 0)
+            cur_idx = last_seen_idx;
 
-        // Détecte le 1er fault observé (plus petit timestamp non nul)
-        if (first_fault_ts == 0) {
-            for (__u32 i = 0; i < buffer_size; i++) {
-                if (ts_buf[i] != 0 &&
-                    (first_fault_ts == 0 || ts_buf[i] < first_fault_ts))
-                    first_fault_ts = ts_buf[i];
+        int new_faults = (cur_idx != last_seen_idx);
+        if (new_faults) {
+            last_seen_idx = cur_idx;
+            // Met à jour le 1er fault observé si pas encore défini
+            if (first_fault_ts == 0) {
+                for (__u32 i = 0; i < buffer_size; i++) {
+                    __u64 v = 0;
+                    if (bpf_map_lookup_elem(timestamps_fd, &i, &v) == 0
+                        && v != 0
+                        && (first_fault_ts == 0 || v < first_fault_ts))
+                        first_fault_ts = v;
+                }
             }
+            // Re-planifie la deadline (le nouveau fault peut changer t_oldest
+            // utile, et surtout signifie qu'on est dans une phase active)
+            RECOMPUTE_DEADLINE();
         }
 
-        // Startup phase : on ne check pas tant qu'une fenêtre complète
-        // ne s'est pas écoulée depuis le 1er fault observé
+        // Startup phase : pas d'évaluation lower bound tant qu'une fenêtre
+        // entière ne s'est pas écoulée depuis le premier fault
         if (first_fault_ts == 0 || now < first_fault_ts + window_ns)
             continue;
 
-        // Compte les faults dans [now - window_ns, now]
-        unsigned long long window_start = now - window_ns;
-        __u32 count = 0;
-        for (__u32 i = 0; i < buffer_size; i++) {
-            if (ts_buf[i] >= window_start && ts_buf[i] <= now)
-                count++;
-        }
+        // Si la deadline n'est pas planifiée, on calcule maintenant
+        if (next_check_deadline == 0)
+            RECOMPUTE_DEADLINE();
 
-        if (count < lower_bound_count) {
-            __u32 zero = 0, pid = 0;
-            if (bpf_map_lookup_elem(monitored_pid_fd, &zero, &pid) == 0
-                && pid != 0) {
-                printf("PFF too low for process with PID %d\n", pid);
+        // Si la deadline est atteinte, on évalue
+        if (next_check_deadline != 0 && now >= next_check_deadline) {
+            // Lit la map et compte dans la fenêtre courante
+            unsigned long long window_start = (now > window_ns) ? now - window_ns : 0;
+            __u32 count = 0;
+            for (__u32 i = 0; i < buffer_size; i++) {
+                __u64 v = 0;
+                if (bpf_map_lookup_elem(timestamps_fd, &i, &v) == 0)
+                    ts_buf[i] = v;
+                else
+                    ts_buf[i] = 0;
+                if (ts_buf[i] >= window_start && ts_buf[i] <= now)
+                    count++;
+            }
+
+            if (count < lower_bound_count) {
+                __u32 pid = 0;
+                if (bpf_map_lookup_elem(monitored_pid_fd, &zero, &pid) == 0
+                    && pid != 0) {
+                    printf("PFF too low for process with PID %d\n", pid);
+                }
+            }
+
+            // Reprogramme la prochaine deadline depuis l'état actuel
+            unsigned long long oldest = 0;
+            for (__u32 i = 0; i < buffer_size; i++) {
+                if (ts_buf[i] >= window_start && ts_buf[i] <= now) {
+                    if (oldest == 0 || ts_buf[i] < oldest)
+                        oldest = ts_buf[i];
+                }
+            }
+            if (oldest == 0) {
+                // Plus aucun fault dans la fenêtre : le count est à 0,
+                // déjà sous le seuil. Pour éviter de spam, on attend qu'un
+                // nouveau fault arrive avant de re-check.
+                next_check_deadline = 0;
+            } else {
+                next_check_deadline = oldest + window_ns + 1000ULL;
             }
         }
     }
